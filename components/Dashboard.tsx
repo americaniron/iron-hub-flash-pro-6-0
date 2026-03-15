@@ -1,14 +1,15 @@
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   LineChart, Line, PieChart, Pie, Cell, AreaChart, Area 
 } from 'recharts';
 import { 
   TrendingUp, Users, FileText, DollarSign, 
-  Package, ArrowUpRight, ArrowDownRight, Activity 
+  Package, ArrowUpRight, ArrowDownRight, Activity, Download, FileSpreadsheet 
 } from 'lucide-react';
 import { InvoiceData, SavedQuote, CustomerAccount, Payment, InventoryPart, QuoteItem } from '../types.ts';
+import { exportQuotes } from '../services/exportService.ts';
 
 interface DashboardProps {
   invoices: InvoiceData[];
@@ -21,6 +22,8 @@ interface DashboardProps {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ invoices, quotes, accounts, payments, inventory, onDataLoaded, onNavigateToQuoting }) => {
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  
   const stats = useMemo(() => {
     const totalRevenue = invoices.reduce((sum, inv) => sum + inv.total, 0);
     const totalPaid = payments.reduce((sum, pay) => sum + pay.amount, 0);
@@ -100,6 +103,34 @@ export const Dashboard: React.FC<DashboardProps> = ({ invoices, quotes, accounts
             <p className="text-slate-500 text-sm font-bold uppercase tracking-widest mt-1">Real-time Engineering & Revenue Metrics</p>
           </div>
           <div className="flex gap-2">
+            <div className="relative">
+              <button 
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                className="px-4 py-2 bg-white border border-slate-200 rounded-xl shadow-sm flex items-center gap-2 hover:border-cat-yellow transition-all"
+              >
+                <Download className="w-4 h-4 text-slate-600" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">Export Quotes</span>
+              </button>
+              
+              {showExportMenu && (
+                <div className="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-2xl border border-slate-100 p-2 z-50 animate-in fade-in zoom-in-95">
+                  <button 
+                    onClick={() => { exportQuotes(quotes, 'excel'); setShowExportMenu(false); }}
+                    className="w-full text-left px-4 py-3 text-[10px] font-black uppercase rounded-xl hover:bg-cat-yellow/10 hover:text-cat-black flex items-center gap-3 transition-colors"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                    Excel (.xlsx)
+                  </button>
+                  <button 
+                    onClick={() => { exportQuotes(quotes, 'csv'); setShowExportMenu(false); }}
+                    className="w-full text-left px-4 py-3 text-[10px] font-black uppercase rounded-xl hover:bg-cat-yellow/10 hover:text-cat-black flex items-center gap-3 transition-colors"
+                  >
+                    <FileText className="w-4 h-4 text-blue-600" />
+                    CSV (.csv)
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="px-4 py-2 bg-white border border-slate-200 rounded-xl shadow-sm flex items-center gap-2">
               <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">System Live</span>
