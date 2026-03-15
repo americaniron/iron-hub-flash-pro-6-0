@@ -1,0 +1,8 @@
+{
+  "name": "IRON HUB FLASH PRO 6.0",
+  "description": "A production-ready logistics and engineering tool for Caterpillar components. Features automated document parsing, AI-powered analysis and image generation, and a full invoicing and accounts management system. Requires a Google AI API key configured in the environment settings.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

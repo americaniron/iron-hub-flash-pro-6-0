@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="American Iron Logistics & Supply Hub - Enterprise Quoting System" />
+    <title>IRON HUB | Enterprise Quoting</title>
+    <script>
+      // Ensure process.env exists for the browser
+      window.process = window.process || {};
+      window.process.env = window.process.env || {};
+      // In AI Studio Build, API_KEY is often injected into the environment
+    </script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23000000'/><path fill='%23ffcd00' d='M16 7l-8 18h3.5l2-4.5h9l2 4.5h3.5L16 7zm-1.5 11l3-7 3 7h-6z'/></svg>">
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF.js & XLSX CDNs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script>
+        if (typeof window !== 'undefined') {
+            window.pdfjsLibUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+    </script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              cat: {
+                yellow: '#ffcd00',
+                black: '#000000',
+                dark: '#111111',
+                gray: '#1a1a1a',
+                light: '#f4f4f4'
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+        :root {
+            --brand-yellow: #ffcd00;
+            --brand-black: #000000;
+            --brand-dark: #0a0a0a;
+            --brand-gray: #1a1a1a;
+            --app-bg: #f5f5f5;
+            --line-color: rgba(0, 0, 0, 0.06);
+        }
+        
+        body { 
+            font-family: 'Plus Jakarta Sans', sans-serif; 
+            background-color: var(--app-bg); 
+            color: #111111; 
+            scroll-behavior: smooth;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+            background-image: 
+              linear-gradient(to right, var(--line-color) 1px, transparent 1px),
+              linear-gradient(to bottom, var(--line-color) 1px, transparent 1px);
+            background-size: 40px 40px;
+            background-position: center center;
+        }
+        
+        /* App Store Style Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; border: 2px solid var(--app-bg); }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+        @media print {
+            body * { visibility: hidden; }
+            .printable-area, .printable-area * { visibility: visible; }
+            .printable-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+            }
+            @page { size: LETTER; margin: 0.5in; }
+            html, body { background: white !important; margin: 0 !important; padding: 0 !important; background-image: none !important; }
+            .no-print { display: none !important; }
+            table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
+            tr { page-break-inside: avoid !important; }
+            thead { display: table-header-group !important; }
+        }
+
+        /* PDF Generation Mode (simulates print styles for html2pdf globally) */
+        body.pdf-generation-mode-active,
+        body.pdf-generation-mode-active * {
+            overflow: visible !important;
+        }
+        .pdf-generation-mode {
+            background: white !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background-image: none !important;
+            width: 1100px !important;
+            max-width: 1100px !important;
+            min-width: 1100px !important;
+        }
+        .pdf-generation-mode .no-print { display: none !important; }
+        .pdf-generation-mode > div, .pdf-generation-mode .invoice-document {
+          margin: 0 !important;
+          box-shadow: none !important;
+          max-width: 1100px !important;
+          width: 1100px !important;
+          min-width: 1100px !important;
+          border-radius: 0 !important;
+          border-top: none !important;
+          overflow: visible !important;
+        }
+        .pdf-generation-mode .print-header { margin-bottom: 24px !important; }
+        .pdf-generation-mode .address-block { padding: 12px !important; border-radius: 8px !important; }
+        .pdf-generation-mode .part-img-container { width: 60px !important; height: 60px !important; }
+
+        /* Tactile Button Interactions */
+        .btn-app {
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        .btn-app:active {
+            transform: scale(0.96);
+        }
+        
+        /* Modern Glassmorphism */
+        .glass {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.03);
+        }
+
+        .card-app {
+            background: #ffffff;
+            border-radius: 24px;
+            border: 1px solid rgba(0, 0, 0, 0.04);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 1px 3px rgba(0, 0, 0, 0.02);
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .card-app:hover {
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.04);
+            transform: translateY(-2px);
+            border-color: rgba(0, 0, 0, 0.08);
+        }
+
+        .fade-in { animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Loading shimmer */
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .shimmer {
+            background: linear-gradient(90deg, #f0f0f0 25%, #f8f8f8 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: shimmer 2s infinite linear;
+        }
+
+        input:focus, select:focus, textarea:focus {
+            border-color: var(--brand-yellow) !important;
+            box-shadow: 0 0 0 4px rgba(255, 205, 0, 0.15) !important;
+            background-color: white !important;
+            outline: none;
+        }
+
+        .industrial-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 2rem;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .section-header::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(to right, var(--line-color), transparent);
+        }
+
+        @keyframes loading {
+            0% { height: 20%; }
+            50% { height: 100%; }
+            100% { height: 20%; }
+        }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom": "https://esm.sh/react-dom@^19.2.3",
+    "react-dom/client": "https://esm.sh/react-dom@^19.2.3/client",
+    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "vite": "https://esm.sh/vite@^7.3.1",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./index.tsx"></script>
+  </body>
+</html>
