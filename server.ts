@@ -222,7 +222,7 @@ app.post("/api/send-email", async (req, res) => {
         }));
       }
 
-      console.log(`Sending email to ${to} with ${emailAttachments.length} attachments...`);
+      console.log(`Sending email to [REDACTED] with ${emailAttachments.length} attachments...`);
       const info = await transporter.sendMail({
         from: `"American Iron Dispatch" <${senderEmail}>`,
         to,

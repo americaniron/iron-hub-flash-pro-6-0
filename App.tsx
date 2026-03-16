@@ -7,7 +7,7 @@ import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
-import { analyzeQuoteData, generateTTS, generatePartImage } from './services/geminiService.ts';
+import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
 import html2pdf from 'html2pdf.js';
 
@@ -150,6 +150,26 @@ const App: React.FC = () => {
   
   const resultRef = useRef<HTMLDivElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const prevLangRef = useRef(config.documentLanguage);
+
+  useEffect(() => {
+    if (config.documentLanguage !== prevLangRef.current) {
+      if (aiAnalysis) {
+        setIsAnalyzing(true);
+        translateText(aiAnalysis, config.documentLanguage)
+          .then(translated => {
+            setAiAnalysis(translated);
+          })
+          .catch(err => {
+            console.error("Translation failed:", err);
+          })
+          .finally(() => {
+            setIsAnalyzing(false);
+          });
+      }
+      prevLangRef.current = config.documentLanguage;
+    }
+  }, [config.documentLanguage, aiAnalysis]);
 
   useEffect(() => {
     if (!user) return;
@@ -266,7 +286,7 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     setAudioData(null); // Clear previous audio on new analysis
     try {
-        const result = await analyzeQuoteData(items, thinking, config.ttsLanguage);
+        const result = await analyzeQuoteData(items, thinking, config.documentLanguage);
         setAiAnalysis(result);
         await dbService.deductCredits(user.username, thinking ? 10 : 5);
     } catch (err) {
@@ -856,7 +876,7 @@ const App: React.FC = () => {
             />
             <div className="no-print">{items.length > 0 && <ItemEditor items={items} onUpdate={setItems} config={config} onDeleteItem={(idx) => setItems(prev => prev.filter((_, i) => i !== idx))} currentUser={user} />}</div>
             <div ref={resultRef} className="quote-preview-container printable-area">
-              <QuotePreview items={items} client={client} config={config} aiAnalysis={aiAnalysis} customLogo={customLogo} isGeneratingImages={isGeneratingImages} audioData={audioData} />
+              <QuotePreview items={items} client={client} config={config} aiAnalysis={aiAnalysis} customLogo={customLogo} isGeneratingImages={isGeneratingImages} audioData={audioData} onConfigChange={setConfig} />
               {aiAnalysis && (
                 <div className="max-w-[1000px] mx-auto mt-4 px-12 no-print flex justify-end items-center gap-2">
                   <div className="flex gap-1 p-1 bg-slate-100 rounded-full">

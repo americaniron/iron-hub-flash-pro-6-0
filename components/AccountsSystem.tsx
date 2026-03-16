@@ -3,7 +3,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { User, CustomerAccount, InvoiceData, Payment, SavedQuote } from '../types.ts';
 import { PaymentReceipt } from './PaymentReceipt.tsx';
 import { exportContacts } from '../services/exportService.ts';
-import { Download, FileSpreadsheet, FileText } from 'lucide-react';
+import { Download, FileSpreadsheet, FileText, RefreshCw } from 'lucide-react';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -442,7 +442,46 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
     const [receiptToShow, setReceiptToShow] = useState<Payment | null>(null);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [showExportMenu, setShowExportMenu] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
+    const [syncMessage, setSyncMessage] = useState<{type: 'success' | 'error', text: string} | null>(null);
     
+    const handleSyncCRM = async () => {
+        setIsSyncing(true);
+        setSyncMessage(null);
+        try {
+            // Attempt to sync with Iron Hub CRM API
+            const response = await fetch('https://iron-hub-suite.replit.app/api/sync', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ accounts }),
+            }).catch(() => null); // Catch network errors
+
+            if (response && response.ok) {
+                const data = await response.json();
+                if (data && Array.isArray(data.accounts)) {
+                    // Pull updates from CRM to local database
+                    await onSaveAccounts(data.accounts);
+                    setSyncMessage({ type: 'success', text: "Successfully synced with Iron Hub CRM via API! Customer data is up to date." });
+                } else {
+                    setSyncMessage({ type: 'success', text: "Successfully synced with Iron Hub CRM via API! No updates received." });
+                }
+            } else {
+                // Fallback to simulated sync if API is not available
+                console.warn("Iron Hub CRM API not available. Simulating sync...");
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                setSyncMessage({ type: 'error', text: "Iron Hub CRM API is currently unreachable. Please use the Import/Export tools to manually sync data with the CRM." });
+            }
+        } catch (error) {
+            console.error("CRM Sync failed:", error);
+            setSyncMessage({ type: 'error', text: "Failed to sync with Iron Hub CRM. Please check your connection." });
+        } finally {
+            setIsSyncing(false);
+            setTimeout(() => setSyncMessage(null), 5000);
+        }
+    };
+
     const selectedAccount = useMemo(() => {
         return accounts.find(a => a.id === selectedAccountId);
     }, [selectedAccountId, accounts]);
@@ -631,6 +670,21 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
                     <button onClick={handleAddNewAccount} className="w-full py-4 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-[0.2em] rounded-2xl btn-app shadow-lg shadow-emerald-600/10">Add New Account</button>
                     <button onClick={() => setIsImportModalOpen(true)} className="w-full py-4 bg-indigo-600 text-white font-black text-[10px] uppercase tracking-[0.2em] rounded-2xl btn-app shadow-lg shadow-indigo-600/10">Import Accounts</button>
                     
+                    <button 
+                        onClick={handleSyncCRM} 
+                        disabled={isSyncing}
+                        className={`w-full py-4 ${isSyncing ? 'bg-slate-400' : 'bg-cat-yellow'} text-cat-black font-black text-[10px] uppercase tracking-[0.2em] rounded-2xl btn-app shadow-lg shadow-cat-yellow/20 flex items-center justify-center gap-2`}
+                    >
+                        <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+                        {isSyncing ? 'Syncing...' : 'Sync Iron Hub CRM'}
+                    </button>
+                    
+                    {syncMessage && (
+                        <div className={`p-3 rounded-xl text-xs font-bold ${syncMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                            {syncMessage.text}
+                        </div>
+                    )}
+
                     <div className="relative">
                         <button 
                             onClick={() => setShowExportMenu(!showExportMenu)}
@@ -655,6 +709,13 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
                                 >
                                     <FileText className="w-4 h-4 text-blue-600" />
                                     CSV (.csv)
+                                </button>
+                                <button 
+                                    onClick={() => { exportContacts(accounts, 'csv', 'IronHub_CRM_Export'); setShowExportMenu(false); }}
+                                    className="w-full text-left px-4 py-3 text-[10px] font-black uppercase rounded-xl hover:bg-cat-yellow/10 hover:text-cat-black flex items-center gap-3 transition-colors border-t border-slate-100 mt-1 pt-2"
+                                >
+                                    <RefreshCw className="w-4 h-4 text-cat-yellow" />
+                                    Iron Hub CRM (.csv)
                                 </button>
                             </div>
                         )}

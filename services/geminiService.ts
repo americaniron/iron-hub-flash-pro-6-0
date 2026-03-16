@@ -137,6 +137,19 @@ async function processImageGenerationQueue() {
  * AI Brainstorming/Analysis using Gemini 3 Pro for complex reasoning.
  * Enhanced with Thinking Mode support.
  */
+export const translateText = async (text: string, targetLanguage: 'en' | 'ar'): Promise<string> => {
+  return geminiCircuitBreaker.execute(async () => {
+    const prompt = `Translate the following text to ${targetLanguage === 'ar' ? 'Arabic' : 'English'}. Preserve the original tone and technical terminology where appropriate.\n\nText:\n${text}`;
+    
+    const response = await callGeminiProxy({
+      model: 'gemini-3.1-flash-lite-preview',
+      contents: prompt,
+    });
+    
+    return response.candidates?.[0]?.content?.parts?.[0]?.text || text;
+  }, () => text);
+};
+
 export const analyzeQuoteData = async (items: QuoteItem[], useThinking: boolean = false, language: 'en' | 'ar' = 'en'): Promise<string> => {
   return geminiCircuitBreaker.execute(async () => {
     const context = items.map((i, idx) => `Line ${(idx + 1).toString().padStart(2, '0')}: ${i.qty}x ${i.partNo} (${i.desc})`).join("\n");

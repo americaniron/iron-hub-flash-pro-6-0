@@ -78,7 +78,7 @@ export const exportQuotes = (quotes: SavedQuote[], format: 'excel' | 'csv') => {
   }
 };
 
-export const exportContacts = (contacts: CustomerAccount[], format: 'excel' | 'csv') => {
+export const exportContacts = (contacts: CustomerAccount[], format: 'excel' | 'csv', customFileName?: string) => {
   const data = contacts.map(contact => ({
     'Account Number': contact.accountNumber,
     'Company': contact.company,
@@ -90,9 +90,11 @@ export const exportContacts = (contacts: CustomerAccount[], format: 'excel' | 'c
     'Internal Notes': contact.internalNotes || '',
   }));
 
+  const fileName = customFileName || 'Contacts_Export';
+
   if (format === 'excel') {
-    exportToExcel(data, 'Contacts_Export', 'Contacts');
+    exportToExcel(data, fileName, 'Contacts');
   } else {
-    exportToCSV(data, 'Contacts_Export');
+    exportToCSV(data, fileName);
   }
 };

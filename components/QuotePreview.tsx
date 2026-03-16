@@ -12,6 +12,7 @@ interface QuotePreviewProps {
   customLogo: string | null;
   isGeneratingImages: boolean;
   audioData: string | null;
+  onConfigChange?: (config: AppConfig) => void;
 }
 
 const formatCurrency = (amount: number) => {
@@ -210,7 +211,7 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
   );
 };
 
-export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, config, aiAnalysis, customLogo, isGeneratingImages, audioData }) => {
+export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, config, aiAnalysis, customLogo, isGeneratingImages, audioData, onConfigChange }) => {
   const lang = config.documentLanguage || 'en';
   const isRtl = lang === 'ar';
   const t = translations[lang];
@@ -393,6 +394,24 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
         .num-col { text-align: ${isRtl ? 'left' : 'right'} !important; }
         .vertical-top { vertical-align: top !important; }
       `}</style>
+
+      {/* Language Switcher (No Print) */}
+      {onConfigChange && (
+        <div className={`absolute top-6 ${isRtl ? 'left-6' : 'right-6'} no-print z-50 flex gap-2 bg-slate-100 p-1.5 rounded-full shadow-sm border border-slate-200`}>
+          <button
+            onClick={() => onConfigChange({ ...config, documentLanguage: 'en' })}
+            className={`px-4 py-1.5 text-[10px] font-black uppercase rounded-full transition-all ${lang === 'en' ? 'bg-white text-cat-black shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+          >
+            English
+          </button>
+          <button
+            onClick={() => onConfigChange({ ...config, documentLanguage: 'ar' })}
+            className={`px-4 py-1.5 text-[10px] font-black uppercase rounded-full transition-all ${lang === 'ar' ? 'bg-white text-cat-black shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+          >
+            العربية
+          </button>
+        </div>
+      )}
 
       <div className="p-14 print:p-0 print-root pdf-generation-mode-root">
         
