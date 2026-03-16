@@ -1,6 +1,5 @@
 
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import nodemailer from "nodemailer";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -195,7 +194,7 @@ app.post("/api/send-email", async (req, res) => {
       
       // Prepare attachments array
       const emailAttachments = [];
-      const processAttachment = (att: any) => {
+      const processAttachment = (att) => {
         if (att.path && typeof att.path === 'string' && att.path.startsWith('data:')) {
           const parts = att.path.split(';base64,');
           if (parts.length === 2) {
@@ -255,6 +254,7 @@ app.post("/api/send-email", async (req, res) => {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -262,7 +262,7 @@ app.post("/api/send-email", async (req, res) => {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
+    app.get("*all", (req, res) => {
       res.sendFile(path.join(__dirname, "dist", "index.html"));
     });
   }
