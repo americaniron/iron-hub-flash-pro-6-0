@@ -130,12 +130,22 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
   };
 
   const handleSend = async () => {
-    if (!draft.to) return;
-    
     setIsSending(true);
     setSendStatus([]);
     
     const addLog = (msg: string) => setSendStatus(prev => [...prev, `[NETWORK] ${msg}`]);
+
+    if (!draft.to) {
+      addLog("ERROR: Recipient email address is required.");
+      setIsSending(false);
+      return;
+    }
+    
+    if (!draft.subject || !draft.body) {
+      addLog("ERROR: Subject and Message Payload are required.");
+      setIsSending(false);
+      return;
+    }
 
     addLog("Initializing Caterpillar Secure SMTP...");
     await new Promise(r => setTimeout(r, 600));
@@ -164,12 +174,11 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
         addLog(`Message ID: ${result.messageId}`);
         if (result.simulated) {
           addLog("WARNING: " + result.note);
-          addLog("Emails are currently simulated. Configure SMTP in settings to send real emails.");
+          addLog("Emails are currently simulated. Configure SMTP in the AI Studio environment variables to send real emails.");
         }
         if (result.previewUrl) {
           addLog("PREVIEW AVAILABLE: " + result.previewUrl);
-          // Optionally open the preview URL in a new tab
-          window.open(result.previewUrl, '_blank');
+          // Do not use window.open in iframe
         }
         await new Promise(r => setTimeout(r, 2500));
         setIsSending(false);

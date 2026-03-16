@@ -63,7 +63,7 @@ async function startServer() {
     if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
       console.log("Test failed: Missing credentials.");
       return res.status(400).json({ 
-        error: "Missing SMTP credentials. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in settings." 
+        error: "Missing SMTP credentials. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in the AI Studio environment variables." 
       });
     }
 
@@ -174,7 +174,7 @@ app.post("/api/send-email", async (req, res) => {
           success: true, 
           messageId: `simulated-${Date.now()}`,
           simulated: true,
-          note: "Email was simulated. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in settings to send real emails."
+          note: "Email was simulated. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in the AI Studio environment variables to send real emails."
         });
       } else {
         try {
