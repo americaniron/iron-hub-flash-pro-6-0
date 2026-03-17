@@ -68,7 +68,10 @@ async function startServer() {
     }
 
     const port = parseInt(process.env.SMTP_PORT || "587");
-    const isSecure = port === 465 ? true : (port === 587 ? false : process.env.SMTP_SECURE === "true");
+    let isSecure = port === 465;
+    if (process.env.SMTP_SECURE === "true") isSecure = true;
+    if (process.env.SMTP_SECURE === "false") isSecure = false;
+    
     const cleanPass = process.env.SMTP_PASS.trim();
 
     console.log(`Testing connection to ${process.env.SMTP_HOST}:${port} (Secure: ${isSecure})`);
@@ -94,10 +97,11 @@ async function startServer() {
     console.log("SMTP connection verified successfully.");
 
     // Send a minimal test email to the sender themselves
-    console.log(`Sending test email to ${process.env.SMTP_USER}...`);
+    const senderEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
+    console.log(`Sending test email to ${senderEmail}...`);
     const info = await transporter.sendMail({
-      from: `"American Iron Test" <${process.env.SMTP_USER}>`,
-      to: process.env.SMTP_USER,
+      from: `"American Iron Test" <${senderEmail}>`,
+      to: senderEmail,
       subject: "SMTP Connection Test - American Iron Dispatch",
       text: "This is a test email to verify your SMTP configuration. If you received this, your email dispatch system is correctly configured.",
       html: `<div style="font-family: sans-serif; padding: 20px; border: 2px solid #fbbf24; border-radius: 12px; background-color: #fffbeb;">
@@ -142,8 +146,10 @@ app.post("/api/send-email", async (req, res) => {
       
       if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
         const port = parseInt(process.env.SMTP_PORT || "587");
-        // Port 465 requires secure: true. Port 587 requires secure: false (uses STARTTLS).
-        const isSecure = port === 465 ? true : (port === 587 ? false : process.env.SMTP_SECURE === "true");
+        let isSecure = port === 465;
+        if (process.env.SMTP_SECURE === "true") isSecure = true;
+        if (process.env.SMTP_SECURE === "false") isSecure = false;
+        
         const cleanPass = process.env.SMTP_PASS.trim();
 
         console.log(`Attempting SMTP connection to ${process.env.SMTP_HOST}:${port} (Secure: ${isSecure})`);
@@ -190,7 +196,7 @@ app.post("/api/send-email", async (req, res) => {
         }
       }
 
-      const senderEmail = process.env.SMTP_USER || 'dispatch@americanironus.com';
+      const senderEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'dispatch@americanironus.com';
       
       // Prepare attachments array
       const emailAttachments = [];

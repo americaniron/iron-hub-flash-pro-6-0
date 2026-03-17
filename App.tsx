@@ -446,6 +446,18 @@ const App: React.FC = () => {
     document.body.removeChild(a);
   };
 
+  const getAudioAttachment = async (): Promise<string | null> => {
+    if (!audioData) return null;
+    const blob = createWavBlob(audioData);
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        resolve(reader.result as string);
+      };
+      reader.readAsDataURL(blob);
+    });
+  };
+
   const handleSaveToBook = useCallback(async (clientData: ClientInfo) => {
     if (!user || !clientData.company) return;
     let existingAccount = clientData.id ? customerAccounts.find(acc => acc.id === clientData.id) : customerAccounts.find(acc => acc.company.toLowerCase() === clientData.company.toLowerCase());
@@ -1005,6 +1017,7 @@ const App: React.FC = () => {
             items={items} 
             generatePdf={generatePdf}
             audioData={audioData}
+            getAudioAttachment={getAudioAttachment}
           />
         </div>
     </ErrorBoundary>

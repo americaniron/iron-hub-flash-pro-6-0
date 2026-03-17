@@ -11,9 +11,10 @@ interface EmailModuleProps {
   invoice?: InvoiceData | null;
   generatePdf?: () => Promise<string | null>;
   audioData?: string | null;
+  getAudioAttachment?: () => Promise<string | null>;
 }
 
-export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, generatePdf, audioData }) => {
+export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, generatePdf, audioData, getAudioAttachment }) => {
   const [draft, setDraft] = useState<EmailDraft>({ to: '', subject: '', body: '' });
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -76,6 +77,31 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
       }
     } catch (err) {
       console.error("PDF Attach error", err);
+    } finally {
+      setIsAttaching(null);
+    }
+  };
+
+  const handleAttachAudio = async () => {
+    if (!audioData || !getAudioAttachment || isAttaching) return;
+    setIsAttaching('audio');
+    try {
+      const base64Wav = await getAudioAttachment();
+      if (base64Wav) {
+        // Calculate size from base64 string (approximate)
+        const sizeInMB = (base64Wav.length * 0.75) / (1024 * 1024);
+        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.wav`;
+        
+        if (!stagedAttachments.some(a => a.filename === filename)) {
+          setStagedAttachments(prev => [...prev, {
+            filename,
+            path: base64Wav,
+            size: `${sizeInMB.toFixed(2)} MB`
+          }]);
+        }
+      }
+    } catch (err) {
+      console.error("Audio Attach error", err);
     } finally {
       setIsAttaching(null);
     }
@@ -298,6 +324,27 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{isRtl ? 'وثيقة هندسية' : 'Engineering Document'}</p>
                 </div>
               </button>
+
+              {/* Manual Audio Attach Button */}
+              {audioData && (
+                <button 
+                  onClick={handleAttachAudio}
+                  disabled={isAttaching !== null}
+                  className={`flex items-center gap-4 px-6 py-4 border-2 rounded-[1.5rem] transition-all group ${isRtl ? 'flex-row-reverse' : ''} ${isAttaching === 'audio' ? 'bg-slate-100 border-slate-200' : 'bg-white border-slate-100 hover:border-cat-yellow hover:shadow-lg active:scale-95'}`}
+                >
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isAttaching === 'audio' ? 'bg-slate-200 text-slate-400 animate-pulse' : 'bg-cat-yellow/10 text-cat-black group-hover:bg-cat-yellow'}`}>
+                    {isAttaching === 'audio' ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path></svg>
+                    )}
+                  </div>
+                  <div className={isRtl ? 'text-right' : 'text-left'}>
+                    <p className="text-[12px] font-black uppercase tracking-widest text-cat-black">{isRtl ? 'إرفاق صوت' : 'Attach Audio'}</p>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{isRtl ? 'تحليل الذكاء الاصطناعي' : 'AI Analysis Brief'}</p>
+                  </div>
+                </button>
+              )}
             </div>
 
             {/* Staged Attachments List */}
