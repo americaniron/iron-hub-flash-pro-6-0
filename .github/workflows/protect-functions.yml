@@ -1,0 +1,102 @@
+name: Protect Cloudflare Functions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'functions/**'
+      - 'public/logo.png'
+
+jobs:
+  restore-if-deleted:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for deleted protected files
+        id: check
+        run: |
+          PROTECTED_FILES=(
+            "functions/api/send-email.js"
+            "functions/api/gemini.js"
+            "functions/api/ai-status.js"
+            "functions/api/test-email.js"
+            "public/logo.png"
+          )
+
+          DELETED=""
+          for f in "${PROTECTED_FILES[@]}"; do
+            if [ ! -f "$f" ]; then
+              DELETED="$DELETED $f"
+            fi
+          done
+
+          if [ -n "$DELETED" ]; then
+            echo "deleted=true" >> $GITHUB_OUTPUT
+            echo "files=$DELETED" >> $GITHUB_OUTPUT
+            echo "::warning::Protected files were deleted:$DELETED"
+          else
+            echo "deleted=false" >> $GITHUB_OUTPUT
+            echo "All protected files present."
+          fi
+
+      - name: Restore deleted files from last known good state
+        if: steps.check.outputs.deleted == 'true'
+        run: |
+          # Find the most recent commit where all protected files existed
+          PROTECTED_FILES=(
+            "functions/api/send-email.js"
+            "functions/api/gemini.js"
+            "functions/api/ai-status.js"
+            "functions/api/test-email.js"
+            "public/logo.png"
+          )
+
+          for f in "${PROTECTED_FILES[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Restoring $f..."
+              # Find the last commit that had this file
+              LAST_GOOD=$(git log --all --diff-filter=D --format="%H" -- "$f" | head -1)
+              if [ -n "$LAST_GOOD" ]; then
+                git show "${LAST_GOOD}^:$f" > "$f" 2>/dev/null || echo "Could not restore $f from ${LAST_GOOD}^"
+              else
+                # File might have been deleted without a trace, check parent commits
+                LAST_GOOD=$(git log --all --format="%H" -- "$f" | head -1)
+                if [ -n "$LAST_GOOD" ]; then
+                  git show "${LAST_GOOD}:$f" > "$f" 2>/dev/null || echo "Could not restore $f"
+                fi
+              fi
+
+              if [ -f "$f" ]; then
+                echo "Successfully restored $f"
+              else
+                echo "::error::Failed to restore $f"
+              fi
+            fi
+          done
+
+      - name: Commit and push restored files
+        if: steps.check.outputs.deleted == 'true'
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add functions/ public/logo.png
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "fix(auto): Restore protected Cloudflare Functions deleted by external tool
+
+          Protected files were automatically restored by GitHub Actions.
+          These files are critical for the app's email, AI, and branding features.
+
+          DO NOT DELETE:
+          - functions/api/send-email.js (SMTP email dispatch)
+          - functions/api/gemini.js (Gemini AI proxy)
+          - functions/api/ai-status.js (AI status endpoint)
+          - functions/api/test-email.js (SMTP connection tester)
+          - public/logo.png (American Iron logo)"
+            git push
+          fi
