@@ -4,6 +4,7 @@ import { AppConfig, ClientInfo, ParseMode, QuoteItem, CustomerAccount, User, Pho
 import { parseTextData, parsePdfFile, parseExcelFile } from '../services/parserService.ts';
 import { performIntelligentTask } from '../services/geminiService.ts';
 import { Logo } from './Logo.tsx';
+import { Country, City } from 'country-state-city';
 
 // --- High-Fidelity UI Components ---
 
@@ -14,6 +15,7 @@ const CustomSelect: React.FC<{
   placeholder?: string;
 }> = ({ options, value, onChange, placeholder }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -29,11 +31,13 @@ const CustomSelect: React.FC<{
   const selectedOption = options.find(opt => opt.value === value);
   const selectedLabel = selectedOption ? selectedOption.label : placeholder || 'Select...';
 
+  const filteredOptions = options.filter(opt => opt.label.toLowerCase().includes(search.toLowerCase()));
+
   return (
     <div className="relative" ref={ref}>
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => { setIsOpen(!isOpen); setSearch(""); }}
         className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all flex items-center justify-between text-left shadow-sm hover:border-slate-300"
       >
         <span className={selectedOption ? "text-cat-black" : "text-slate-400"}>{selectedLabel}</span>
@@ -41,8 +45,20 @@ const CustomSelect: React.FC<{
       </button>
       {isOpen && (
         <div className="absolute top-full mt-2 w-full bg-white rounded-2xl shadow-[0_10px_40px_rgba(0,0,0,0.08)] border border-slate-100 p-2 z-50 animate-in fade-in zoom-in-95 duration-200">
+          {options.length > 10 && (
+            <div className="mb-2 px-2">
+              <input 
+                type="text" 
+                placeholder="Search..." 
+                className="w-full h-[36px] px-3 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-lg text-[12px] font-bold focus:bg-white outline-none focus:border-cat-yellow transition-all"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+          )}
           <div className="max-h-[240px] overflow-y-auto pr-1 custom-scrollbar">
-            {options.map(option => (
+            {filteredOptions.length > 0 ? filteredOptions.map(option => (
               <button
                 key={option.value}
                 type="button"
@@ -55,7 +71,9 @@ const CustomSelect: React.FC<{
                 {option.label}
                 {value === option.value && <svg className="w-4 h-4 text-cat-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>}
               </button>
-            ))}
+            )) : (
+              <div className="px-4 py-3 text-[12px] text-slate-400 font-bold text-center">No results found</div>
+            )}
           </div>
         </div>
       )}
@@ -144,6 +162,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [isIntelWorking, setIsIntelWorking] = useState(false);
   const [shippingSameAsBilling, setShippingSameAsBilling] = useState(true);
   const [isSavedToBook, setIsSavedToBook] = useState(false);
+
+  const countryOptions = Country.getAllCountries().map(c => ({ value: c.isoCode, label: c.name }));
+  const billingCityOptions = props.client.billingCountry ? City.getCitiesOfCountry(props.client.billingCountry)?.map(c => ({ value: c.name, label: c.name })) || [] : [];
+  const shippingCityOptions = props.client.shippingCountry ? City.getCitiesOfCountry(props.client.shippingCountry)?.map(c => ({ value: c.name, label: c.name })) || [] : [];
 
   useEffect(() => {
     if (shippingSameAsBilling) {
@@ -425,18 +447,37 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
             <div className="grid grid-cols-2 gap-4 mb-4">
               <AppInput label="Enterprise Name"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.company} onChange={(e) => props.onClientChange({...props.client, company: e.target.value})} /></AppInput>
               <AppInput label="Access Account"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-mono font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.accountNumber} onChange={(e) => props.onClientChange({...props.client, accountNumber: e.target.value})} /></AppInput>
-              <AppInput label="Technical Liaison"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.contactName} onChange={(e) => props.onClientChange({...props.client, contactName: e.target.value})} /></AppInput>
-              <AppInput label="Operational Email"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.email} onChange={(e) => props.onClientChange({...props.client, email: e.target.value})} /></AppInput>
+              <AppInput label="Contact Name"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.contactName} onChange={(e) => props.onClientChange({...props.client, contactName: e.target.value})} /></AppInput>
+              <AppInput label="Contact Email"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.email} onChange={(e) => props.onClientChange({...props.client, email: e.target.value})} /></AppInput>
+              <AppInput label="Contact Phone Number"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.phone} onChange={(e) => props.onClientChange({...props.client, phone: e.target.value})} /></AppInput>
             </div>
             
             <div className="pt-4 border-t border-slate-100 space-y-4">
               <SectionTitle title="Billing Address" subtitle="Primary legal address" />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                  <AppInput label="Address Line" className="md:col-span-2"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingAddress} onChange={(e) => props.onClientChange({...props.client, billingAddress: e.target.value})} /></AppInput>
-                 <AppInput label="City"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingCity} onChange={(e) => props.onClientChange({...props.client, billingCity: e.target.value})} /></AppInput>
+                 <AppInput label="Country">
+                   <CustomSelect
+                     value={props.client.billingCountry || ''}
+                     onChange={(val) => props.onClientChange({...props.client, billingCountry: val, billingCity: ''})}
+                     placeholder="Select Country..."
+                     options={countryOptions}
+                   />
+                 </AppInput>
+                 <AppInput label="City">
+                   {billingCityOptions.length > 0 ? (
+                     <CustomSelect
+                       value={props.client.billingCity || ''}
+                       onChange={(val) => props.onClientChange({...props.client, billingCity: val})}
+                       placeholder="Select City..."
+                       options={billingCityOptions}
+                     />
+                   ) : (
+                     <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingCity} onChange={(e) => props.onClientChange({...props.client, billingCity: e.target.value})} />
+                   )}
+                 </AppInput>
                  <AppInput label="State/Province"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingState} onChange={(e) => props.onClientChange({...props.client, billingState: e.target.value})} /></AppInput>
                  <AppInput label="ZIP/Postal Code"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingZip} onChange={(e) => props.onClientChange({...props.client, billingZip: e.target.value})} /></AppInput>
-                 <AppInput label="Country"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingCountry} onChange={(e) => props.onClientChange({...props.client, billingCountry: e.target.value})} /></AppInput>
               </div>
             </div>
 
@@ -451,10 +492,28 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
               {!shippingSameAsBilling && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in duration-300">
                   <AppInput label="Address Line" className="md:col-span-2"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingAddress} onChange={(e) => props.onClientChange({...props.client, shippingAddress: e.target.value})} /></AppInput>
-                  <AppInput label="City"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingCity} onChange={(e) => props.onClientChange({...props.client, shippingCity: e.target.value})} /></AppInput>
+                  <AppInput label="Country">
+                    <CustomSelect
+                      value={props.client.shippingCountry || ''}
+                      onChange={(val) => props.onClientChange({...props.client, shippingCountry: val, shippingCity: ''})}
+                      placeholder="Select Country..."
+                      options={countryOptions}
+                    />
+                  </AppInput>
+                  <AppInput label="City">
+                    {shippingCityOptions.length > 0 ? (
+                      <CustomSelect
+                        value={props.client.shippingCity || ''}
+                        onChange={(val) => props.onClientChange({...props.client, shippingCity: val})}
+                        placeholder="Select City..."
+                        options={shippingCityOptions}
+                      />
+                    ) : (
+                      <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingCity} onChange={(e) => props.onClientChange({...props.client, shippingCity: e.target.value})} />
+                    )}
+                  </AppInput>
                   <AppInput label="State/Province"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingState} onChange={(e) => props.onClientChange({...props.client, shippingState: e.target.value})} /></AppInput>
                   <AppInput label="ZIP/Postal Code"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingZip} onChange={(e) => props.onClientChange({...props.client, shippingZip: e.target.value})} /></AppInput>
-                  <AppInput label="Country"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingCountry} onChange={(e) => props.onClientChange({...props.client, shippingCountry: e.target.value})} /></AppInput>
                 </div>
               )}
             </div>
@@ -523,12 +582,29 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                 </AppInput>
               )}
               <AppInput label="Payment Terms">
-                <input 
-                  type="text" 
-                  placeholder="e.g. NET 30"
-                  className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" 
-                  value={props.config.paymentTerms || ''} 
-                  onChange={(e) => props.onConfigChange({...props.config, paymentTerms: e.target.value})} 
+                <CustomSelect
+                  value={props.config.paymentTerms || ''}
+                  onChange={(val) => props.onConfigChange({...props.config, paymentTerms: val})}
+                  placeholder="Select Payment Terms..."
+                  options={[
+                    { value: 'PIA (Payment in Advance)', label: 'PIA (Payment in Advance)' },
+                    { value: 'CIA (Cash in Advance)', label: 'CIA (Cash in Advance)' },
+                    { value: 'COD (Cash on Delivery)', label: 'COD (Cash on Delivery)' },
+                    { value: 'CWO (Cash with Order)', label: 'CWO (Cash with Order)' },
+                    { value: 'Net 7', label: 'Net 7' },
+                    { value: 'Net 10', label: 'Net 10' },
+                    { value: 'Net 15', label: 'Net 15' },
+                    { value: 'Net 30', label: 'Net 30' },
+                    { value: 'Net 60', label: 'Net 60' },
+                    { value: 'Net 90', label: 'Net 90' },
+                    { value: 'EOM (End of Month)', label: 'EOM (End of Month)' },
+                    { value: '1% 10 Net 30', label: '1% 10 Net 30' },
+                    { value: '2% 10 Net 30', label: '2% 10 Net 30' },
+                    { value: 'LC (Letter of Credit)', label: 'LC (Letter of Credit)' },
+                    { value: 'TT (Telegraphic Transfer)', label: 'TT (Telegraphic Transfer)' },
+                    { value: 'DP (Documents against Payment)', label: 'DP (Documents against Payment)' },
+                    { value: 'DA (Documents against Acceptance)', label: 'DA (Documents against Acceptance)' }
+                  ]}
                 />
               </AppInput>
               <div className="md:col-span-2 lg:col-span-3">

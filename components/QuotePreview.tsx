@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { QuoteItem, ClientInfo, AppConfig, PhotoMode } from '../types.ts';
 import { PartImage } from './PartImage.tsx';
 import { Logo } from './Logo.tsx';
+import { Country } from 'country-state-city';
 
 interface QuotePreviewProps {
   items: QuoteItem[];
@@ -116,14 +117,14 @@ const translations = {
     attn: "ATTN",
     terms: "Terms & Conditions",
     totalWeight: "TOTAL WEIGHT",
-    freightFactor: "Freight Factor",
+    freightFactor: "DHL 2-DAY AIR SHIPPING",
     loyaltyDiscount: "Customer Loyalty Discount",
     totalCore: "Total Core Deposits",
     totalDocValue: "Total Document Value",
     commercialTerms: "Commercial Terms",
     downloadBrief: "Download Audio Brief",
     aiAnalysisTitle: "AI System Analysis",
-    manifestSubtotal: "Manifest Subtotal"
+    manifestSubtotal: "SUB-TOTAL"
   },
   ar: {
     logistics: "دعم كاتر بيلر والخدمات اللوجستية",
@@ -190,6 +191,8 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
     country: client.billingCountry,
   };
 
+  const countryName = effectiveAddress.country ? (Country.getCountryByCode(effectiveAddress.country)?.name || effectiveAddress.country) : '';
+
   return (
     <div className="bg-slate-50/80 p-8 rounded-[2rem] border border-slate-200/60 text-[10px] h-full flex flex-col address-block print:flex-1 print:bg-white print:p-3 print:border-slate-300 print:rounded-lg shadow-sm print:break-inside-avoid">
       <h3 className="text-[9px] font-black uppercase tracking-[0.2em] text-cat-black mb-5 print:text-[7pt] print:mb-1">
@@ -200,7 +203,7 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
         <div className="text-slate-600 leading-relaxed uppercase font-bold print:text-[8pt] print:text-black">
           {effectiveAddress.address}<br />
           {effectiveAddress.city}, {effectiveAddress.state} {effectiveAddress.zip}<br />
-          {effectiveAddress.country}
+          {countryName}
         </div>
         <div className="pt-3 flex flex-col gap-1.5 border-t border-slate-200/80 mt-3">
            {client.contactName && <p className="text-slate-500 font-black uppercase text-[10px] tracking-widest print:text-[7pt] print:text-slate-700">{t.attn}: <span className="text-cat-black">{client.contactName}</span></p>}
@@ -550,7 +553,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
             <div className="space-y-4 print:mt-4 terms-box">
                <div className={`text-[11px] text-slate-400 uppercase font-black tracking-[0.2em] print:text-black ${isRtl ? 'mr-2 text-right' : 'ml-2 text-left'}`}>{t.terms}</div>
-               <p className={`text-[10px] text-slate-500 leading-relaxed uppercase font-bold print:text-black bg-slate-50/80 p-8 rounded-[2rem] border border-slate-200/60 shadow-sm ${isRtl ? 'text-right' : 'text-left'}`}>
+               <p className={`text-[8px] text-slate-500 leading-relaxed uppercase font-bold print:text-black bg-slate-50/80 p-8 rounded-[2rem] border border-slate-200/60 shadow-sm ${isRtl ? 'text-right' : 'text-left'}`}>
                   {config.specialInstructions || defaultTerms[lang]}
                </p>
             </div>
@@ -573,7 +576,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
                           </td>
                       </tr>
                       <tr className="text-[11px] print:text-[7pt]">
-                          <td className={`py-2 uppercase tracking-[0.15em] font-black text-slate-400 print:text-slate-700 ${isRtl ? 'text-right' : 'text-left'}`}>{`${t.freightFactor} ($${config.logisticsRate.toFixed(2)} / ${config.weightUnit.toLowerCase()})`}</td>
+                          <td className={`py-2 uppercase tracking-[0.15em] font-black text-slate-400 print:text-slate-700 ${isRtl ? 'text-right' : 'text-left'}`}>{t.freightFactor}</td>
                           <td className={`py-2 font-mono font-black text-cat-black ${isRtl ? 'text-left' : 'num-col'}`}>{`$${formatCurrency(logistics)}`}</td>
                       </tr>
                       {discount > 0 && (
