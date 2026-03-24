@@ -2,7 +2,8 @@
  * IronSuite Sync Service
  *
  * Handles one-way sync from Iron Hub 6.0 → IronSuite (Replit app).
- * Routes ALL requests through Cloudflare Pages Function proxies to avoid CORS issues.
+ * Routes ALL requests through Cloudflare Pages Function proxy.
+ * Sends data in batches per category to avoid HTTP 413 (payload too large).
  */
 
 export interface SyncResult {
@@ -15,93 +16,114 @@ export interface SyncResult {
 
 /**
  * Attempt login to IronSuite via our proxy.
- * Returns the session cookie string if successful.
  */
-export async function loginToIronSuite(username: string, password: string): Promise<{ success: boolean; sessionCookie?: string; user?: any; error?: string; hint?: string }> {
+export async function loginToIronSuite(username: string, password: string): Promise<{ success: boolean; sessionCookie?: string; user?: any; error?: string; note?: string; debug?: any }> {
   try {
     const response = await fetch('/api/ironsuite-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
 /**
- * Verify a session cookie works by checking /api/auth/me through proxy.
- */
-export async function verifySessionCookie(sessionCookie: string): Promise<{ valid: boolean; user?: any }> {
-  try {
-    const response = await fetch('/api/sync-to-ironsuite', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionCookie, syncData: {}, verifyOnly: true }),
-    });
-
-    // If we get a 200 back even with empty data, the session is valid
-    if (response.ok) {
-      const data = await response.json();
-      return { valid: true, user: data.user };
-    }
-    return { valid: false };
-  } catch {
-    return { valid: false };
-  }
-}
-
-/**
  * Sync all data from Iron Hub 6.0 → IronSuite via Cloudflare proxy.
- * The proxy handles auth and CORS — we just send the data + session cookie.
+ * Sends each data category as a separate request to avoid 413 errors.
+ * Further chunks large categories (like inventory) into batches of 50.
  */
 export async function syncToIronSuite(
   syncData: Record<string, any>,
   sessionCookie: string,
   onProgress?: (message: string) => void
 ): Promise<SyncResult> {
-  onProgress?.('Sending data to sync proxy...');
+  const BATCH_SIZE = 50;
 
-  try {
-    const response = await fetch('/api/sync-to-ironsuite', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionCookie, syncData }),
-    });
+  const results: SyncResult = {
+    user: 'unknown',
+    timestamp: new Date().toISOString(),
+    totalSynced: 0,
+    totalFailed: 0,
+    results: {},
+  };
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(errorData.error || `Sync proxy returned ${response.status}`);
+  // Categories to sync
+  const categories = [
+    { key: 'accounts', label: 'Accounts' },
+    { key: 'quotes', label: 'Quotes' },
+    { key: 'invoices', label: 'Invoices' },
+    { key: 'payments', label: 'Payments' },
+    { key: 'inventory', label: 'Inventory' },
+  ];
+
+  for (const { key, label } of categories) {
+    const items = syncData[key];
+    if (!items || !Array.isArray(items) || items.length === 0) continue;
+
+    // Split into batches
+    const batches: any[][] = [];
+    for (let i = 0; i < items.length; i += BATCH_SIZE) {
+      batches.push(items.slice(i, i + BATCH_SIZE));
     }
 
-    const result = await response.json();
+    const categoryResult = { success: 0, failed: 0, errors: [] as string[] };
 
-    onProgress?.('Sync complete!');
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const batchLabel = batches.length > 1
+        ? `${label} (batch ${b + 1}/${batches.length})`
+        : label;
 
-    // Normalize the result to match our SyncResult interface
-    return {
-      user: result.user || 'unknown',
-      timestamp: result.timestamp || new Date().toISOString(),
-      totalSynced: result.totalSynced || 0,
-      totalFailed: result.totalFailed || 0,
-      results: normalizeResults(result.results || {}),
-    };
-  } catch (err: any) {
-    throw new Error(`Sync failed: ${err.message}`);
+      onProgress?.(`Syncing ${batchLabel}... (${batch.length} items)`);
+
+      try {
+        // Send only this category's batch
+        const payload: Record<string, any> = {};
+        payload[key] = batch;
+
+        const response = await fetch('/api/sync-to-ironsuite', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionCookie, syncData: payload }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+          categoryResult.failed += batch.length;
+          categoryResult.errors.push(`${batchLabel}: ${errorData.error || `HTTP ${response.status}`}`);
+          continue;
+        }
+
+        const batchResult = await response.json();
+
+        // Aggregate results from this batch
+        for (const [, val] of Object.entries(batchResult.results || {})) {
+          const v = val as any;
+          categoryResult.success += v.success || 0;
+          categoryResult.failed += v.failed || 0;
+          if (v.errors?.length) categoryResult.errors.push(...v.errors.slice(0, 3));
+        }
+
+        // Update user info if available
+        if (batchResult.user && batchResult.user !== 'unknown') {
+          results.user = batchResult.user;
+        }
+
+      } catch (err: any) {
+        categoryResult.failed += batch.length;
+        categoryResult.errors.push(`${batchLabel}: ${err.message}`);
+      }
+    }
+
+    results.results[key] = categoryResult;
+    results.totalSynced += categoryResult.success;
+    results.totalFailed += categoryResult.failed;
+    onProgress?.(`${label}: ${categoryResult.success} synced, ${categoryResult.failed} failed`);
   }
-}
 
-function normalizeResults(raw: Record<string, any>): Record<string, { success: number; failed: number; errors: string[] }> {
-  const normalized: Record<string, { success: number; failed: number; errors: string[] }> = {};
-  for (const [key, val] of Object.entries(raw)) {
-    normalized[key] = {
-      success: (val as any).success || 0,
-      failed: (val as any).failed || 0,
-      errors: (val as any).errors || [],
-    };
-  }
-  return normalized;
+  onProgress?.('Sync complete!');
+  return results;
 }
