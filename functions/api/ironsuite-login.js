@@ -1,9 +1,8 @@
 /**
  * Cloudflare Pages Function: IronSuite Login Proxy
  *
- * Proxies login to IronSuite's Replit-based auth and returns the session cookie.
- * Since IronSuite uses Replit OIDC, we try the /api/auth/login endpoint
- * or fall back to checking /api/auth/me with provided credentials.
+ * Proxies login to IronSuite and returns the session cookie.
+ * IronSuite uses POST /api/auth/login with { username, password }.
  */
 
 const IRONSUITE_BASE = 'https://iron-hub-suite.replit.app';
@@ -23,72 +22,111 @@ export async function onRequestPost(context) {
     const { username, password } = await context.request.json();
 
     if (!username || !password) {
-      return new Response(JSON.stringify({ error: 'Username and password required.' }), {
+      return new Response(JSON.stringify({ success: false, error: 'Username and password required.' }), {
         status: 400,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
     }
 
-    // Attempt login via IronSuite's auth endpoint
+    // POST to IronSuite's login endpoint (same as their frontend does)
     const loginResponse = await fetch(`${IRONSUITE_BASE}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
-      redirect: 'manual', // Don't follow redirects — we need the Set-Cookie header
+      redirect: 'manual',
     });
 
-    // Extract session cookie from the response
-    const setCookieHeader = loginResponse.headers.get('set-cookie') || '';
-    const allHeaders = [...loginResponse.headers.entries()];
-
-    // Collect all set-cookie values
+    // Extract session cookies - Cloudflare Workers supports getSetCookie()
     let cookies = [];
-    for (const [key, value] of allHeaders) {
-      if (key.toLowerCase() === 'set-cookie') {
-        cookies.push(value);
+    try {
+      // Cloudflare Workers / modern runtime
+      cookies = loginResponse.headers.getSetCookie ? loginResponse.headers.getSetCookie() : [];
+    } catch (e) {
+      // fallback
+      cookies = [];
+    }
+
+    // Fallback: try .get('set-cookie') which may return combined cookies
+    if (cookies.length === 0) {
+      const raw = loginResponse.headers.get('set-cookie');
+      if (raw) {
+        // Split on comma followed by a cookie name pattern (name=)
+        cookies = raw.split(/,(?=\s*\w+=)/);
       }
     }
 
-    // Also try to get cookies from the raw header
-    if (cookies.length === 0 && setCookieHeader) {
-      cookies = [setCookieHeader];
-    }
-
-    // Build a cookie string for forwarding
+    // Build a cookie string: just name=value pairs, stripped of attributes
     const cookieString = cookies
-      .map(c => c.split(';')[0]) // Just the name=value part
+      .map(c => c.split(';')[0].trim())
+      .filter(Boolean)
       .join('; ');
 
-    if (loginResponse.ok || loginResponse.status === 302 || loginResponse.status === 301) {
-      // Verify the session works
-      const verifyResponse = await fetch(`${IRONSUITE_BASE}/api/auth/me`, {
-        headers: {
-          'Cookie': cookieString,
-          'Accept': 'application/json',
-        },
-      });
+    // Also get the response body for success/error info
+    const responseBody = await loginResponse.text().catch(() => '');
+    let responseJson = null;
+    try { responseJson = JSON.parse(responseBody); } catch (e) {}
 
-      if (verifyResponse.ok) {
-        const user = await verifyResponse.json().catch(() => null);
+    // Check if login was successful (200 or redirect)
+    if (loginResponse.ok || loginResponse.status === 302 || loginResponse.status === 301) {
+
+      // If we got cookies, verify the session works
+      if (cookieString) {
+        const verifyResponse = await fetch(`${IRONSUITE_BASE}/api/auth/me`, {
+          headers: { 'Cookie': cookieString, 'Accept': 'application/json' },
+        });
+
+        if (verifyResponse.ok) {
+          const user = await verifyResponse.json().catch(() => null);
+          return new Response(JSON.stringify({
+            success: true,
+            sessionCookie: cookieString,
+            user: user,
+          }), {
+            status: 200,
+            headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      // Login succeeded but we couldn't verify the session
+      // The response body itself might contain a token or session info
+      if (responseJson && (responseJson.token || responseJson.sessionId || responseJson.user)) {
         return new Response(JSON.stringify({
           success: true,
-          sessionCookie: cookieString,
-          user: user,
+          sessionCookie: cookieString || responseJson.token || responseJson.sessionId || '',
+          user: responseJson.user || null,
+          note: 'Login succeeded. Session from response body.',
         }), {
           status: 200,
           headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
         });
       }
+
+      // Login 200 but no cookies and no token - return what we have
+      return new Response(JSON.stringify({
+        success: true,
+        sessionCookie: cookieString || '',
+        user: responseJson || null,
+        note: cookieString ? 'Cookie extracted but verification failed.' : 'Login OK but no session cookie found in response.',
+        debug: {
+          status: loginResponse.status,
+          hasCookies: cookies.length > 0,
+          bodyPreview: responseBody.substring(0, 200),
+        }
+      }), {
+        status: 200,
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      });
     }
 
-    // If direct login didn't work, the response body may contain error info
-    const responseText = await loginResponse.text().catch(() => '');
-
+    // Login failed
     return new Response(JSON.stringify({
       success: false,
-      error: `Login failed (HTTP ${loginResponse.status}). IronSuite may use Replit SSO — try the session cookie method instead.`,
-      hint: 'Open IronSuite in another tab, log in, then copy your session cookie from DevTools → Application → Cookies.',
-      responseStatus: loginResponse.status,
+      error: (responseJson && responseJson.message) ? responseJson.message : `Login failed (HTTP ${loginResponse.status})`,
+      debug: {
+        status: loginResponse.status,
+        bodyPreview: responseBody.substring(0, 200),
+      }
     }), {
       status: 401,
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -96,6 +134,7 @@ export async function onRequestPost(context) {
 
   } catch (err) {
     return new Response(JSON.stringify({
+      success: false,
       error: `Login proxy error: ${err.message}`
     }), {
       status: 500,

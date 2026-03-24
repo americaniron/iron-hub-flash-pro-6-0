@@ -815,9 +815,12 @@ const App: React.FC = () => {
       if (result.success && result.sessionCookie) {
         setIronSuiteSession(result.sessionCookie);
         setLoginError('');
+      } else if (result.success && !result.sessionCookie) {
+        // Login OK but no cookie returned — show debug info
+        const note = result.note || 'Login succeeded but no session cookie was returned.';
+        setLoginError(note + (result.debug ? ` (Status: ${result.debug.status}, Cookies: ${result.debug.hasCookies})` : ''));
       } else {
-        setLoginError(result.error || 'Login failed.');
-        if (result.hint) setLoginError(prev => prev + ' ' + result.hint);
+        setLoginError(result.error || 'Login failed. Check your credentials.');
       }
     } catch (err: any) {
       setLoginError(err.message);
