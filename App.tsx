@@ -925,7 +925,7 @@ const App: React.FC = () => {
       case 'invoicing': return <InvoiceSystem initialInvoice={initialInvoiceData} onClearInitialInvoice={() => setInitialInvoiceData(null)} currentUser={user} syncStatus={syncStatus} onLogout={handleLogout} customerAccounts={customerAccounts} allInvoices={invoices} onSaveInvoices={handleSaveInvoices} customLogo={customLogo} onSendInvoice={handleSendInvoice} templates={templates} onSaveTemplates={handleSaveTemplates} recurringInvoices={recurringInvoices} onSaveRecurring={handleSaveRecurring} />;
       case 'accounts': return <AccountsSystem currentUser={user} accounts={customerAccounts} invoices={invoices} payments={payments} quoteHistory={quoteHistory} onSavePayments={handlePaymentsUpdate} onSaveAccounts={handleSaveAccounts} onDeleteAccount={handleDeleteAccount} onNewDocument={handleNewDocumentForCustomer}/>;
       case 'inventory': return <InventorySystem currentUser={user} />;
-      case 'dashboard': return <Dashboard invoices={invoices} quotes={quoteHistory} accounts={customerAccounts} payments={payments} inventory={inventory} />;
+      case 'dashboard': return <Dashboard invoices={invoices} quotes={quoteHistory} accounts={customerAccounts} payments={payments} inventory={inventory} onNavigateToQuoting={() => setActiveSystem('quoting')} onDataLoaded={(newItems) => { handleDataLoaded(newItems); setActiveSystem('quoting'); }} />;
     }
   };
 
