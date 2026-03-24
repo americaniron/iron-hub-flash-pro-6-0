@@ -9,6 +9,7 @@ import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
 import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
+import { syncToIronSuite, SyncResult } from './services/syncService.ts';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -120,6 +121,10 @@ const App: React.FC = () => {
   const [recurringInvoices, setRecurringInvoices] = useState<RecurringInvoice[]>([]);
   const [templates, setTemplates] = useState<InvoiceTemplate[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('stable');
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<string>('');
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const [client, setClient] = useState<ClientInfo>({ 
     accountNumber: '', company: '', contactName: '', email: '', phone: '',
@@ -795,6 +800,24 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSyncToIronSuite = async () => {
+    if (!user) return;
+    setIsSyncing(true);
+    setSyncProgress('Collecting data from Iron Hub...');
+    setSyncResult(null);
+    try {
+      const data = await dbService.exportAllUserData(user.username);
+      setSyncProgress('Connecting to IronSuite...');
+      const result = await syncToIronSuite(data, (msg) => setSyncProgress(msg));
+      setSyncResult(result);
+      setSyncProgress('Sync complete!');
+    } catch (err: any) {
+      setSyncProgress(`Sync failed: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const handleImportData = (file: File) => {
     if (!user || !window.confirm("This will overwrite all current data. This action cannot be undone. Are you sure?")) return;
     const reader = new FileReader();
@@ -982,6 +1005,17 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowSyncModal(true)}
+                className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-black uppercase tracking-[0.15em] rounded-xl transition-all shadow-md shadow-emerald-600/20 hover:shadow-lg hover:shadow-emerald-600/30 hover:scale-[1.02] active:scale-95"
+                title="Sync data to IronSuite"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                Sync to IronSuite
+              </button>
+            </div>
+
             <div className="flex items-center gap-5 bg-slate-50/80 border border-slate-200/80 rounded-2xl p-2 pr-5 transition-all duration-300 hover:bg-white hover:border-slate-300 hover:shadow-md shadow-sm cursor-pointer">
               <div className="w-10 h-10 rounded-xl bg-cat-black flex items-center justify-center shadow-inner">
                 <span className="text-cat-yellow font-black text-[13px]">{user.displayName.charAt(0)}</span>
@@ -1019,6 +1053,134 @@ const App: React.FC = () => {
             audioData={audioData}
             getAudioAttachment={getAudioAttachment}
           />
+        </div>
+
+        {/* IronSuite Sync Modal */}
+        {showSyncModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center animate-in fade-in duration-200">
+            <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg mx-4 overflow-hidden border border-slate-200/60">
+              {/* Header */}
+              <div className="bg-cat-black px-8 py-6 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl -mr-20 -mt-20"></div>
+                <div className="relative z-10 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-black uppercase tracking-tight text-white">Sync to IronSuite</h2>
+                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Push all data to your IronSuite platform</p>
+                  </div>
+                  <button
+                    onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); }}
+                    className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="p-8 space-y-6">
+                {/* Data Summary */}
+                <div className="space-y-3">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Data to Sync</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { label: 'Accounts', count: customerAccounts.length, icon: '👥' },
+                      { label: 'Quotes', count: quoteHistory.length, icon: '📋' },
+                      { label: 'Invoices', count: invoices.length, icon: '📄' },
+                      { label: 'Payments', count: payments.length, icon: '💰' },
+                      { label: 'Inventory', count: inventory.length, icon: '📦' },
+                      { label: 'Templates', count: templates.length, icon: '📝' },
+                    ].map(item => (
+                      <div key={item.label} className="bg-slate-50 rounded-xl p-3 text-center border border-slate-100">
+                        <div className="text-lg">{item.icon}</div>
+                        <div className="text-[18px] font-black text-cat-black">{item.count}</div>
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{item.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Destination */}
+                <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200/50 flex items-center gap-4">
+                  <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-black text-emerald-900 uppercase tracking-wider">Target: IronSuite Platform</p>
+                    <p className="text-[10px] font-bold text-emerald-700">iron-hub-suite.replit.app</p>
+                  </div>
+                </div>
+
+                {/* Progress */}
+                {syncProgress && (
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/50">
+                    <div className="flex items-center gap-3">
+                      {isSyncing && <div className="w-4 h-4 border-2 border-emerald-600/30 border-t-emerald-600 rounded-full animate-spin flex-shrink-0"></div>}
+                      {!isSyncing && syncResult && <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>}
+                      <p className="text-[11px] font-bold text-slate-600">{syncProgress}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Results */}
+                {syncResult && (
+                  <div className="space-y-3">
+                    <div className="flex gap-3">
+                      <div className="flex-1 bg-emerald-50 rounded-xl p-3 text-center border border-emerald-200/50">
+                        <div className="text-[22px] font-black text-emerald-700">{syncResult.totalSynced}</div>
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-600">Synced</div>
+                      </div>
+                      <div className="flex-1 bg-red-50 rounded-xl p-3 text-center border border-red-200/50">
+                        <div className="text-[22px] font-black text-red-700">{syncResult.totalFailed}</div>
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-red-600">Failed</div>
+                      </div>
+                    </div>
+                    {Object.entries(syncResult.results).map(([key, val]: [string, any]) => (
+                      <div key={key} className="flex justify-between items-center text-[10px] px-2">
+                        <span className="font-bold uppercase tracking-wider text-slate-500">{key}</span>
+                        <span className="font-black text-cat-black">{val.success} ok / {val.failed} failed</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Important note */}
+                <div className="bg-amber-50 rounded-xl p-4 border border-amber-200/50">
+                  <p className="text-[10px] font-bold text-amber-800 leading-relaxed">
+                    <span className="font-black">Note:</span> You must be logged into IronSuite in this browser for the sync to work.
+                    If sync fails with auth errors, <a href="https://iron-hub-suite.replit.app/api/login" target="_blank" rel="noopener" className="underline font-black hover:text-amber-900">log in to IronSuite first</a>, then try again.
+                  </p>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-8 py-5 bg-slate-50 border-t border-slate-200/60 flex justify-between">
+                <button
+                  onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); }}
+                  className="px-6 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 transition-colors"
+                >
+                  Close
+                </button>
+                <button
+                  onClick={handleSyncToIronSuite}
+                  disabled={isSyncing}
+                  className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none flex items-center gap-2"
+                >
+                  {isSyncing ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                      Syncing...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                      Start Sync
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         </div>
     </ErrorBoundary>
   );

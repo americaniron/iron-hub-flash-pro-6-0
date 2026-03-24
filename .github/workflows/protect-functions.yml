@@ -24,6 +24,7 @@ jobs:
             "functions/api/gemini.js"
             "functions/api/ai-status.js"
             "functions/api/test-email.js"
+            "functions/api/sync-to-ironsuite.js"
             "public/logo.png"
           )
 
@@ -52,6 +53,7 @@ jobs:
             "functions/api/gemini.js"
             "functions/api/ai-status.js"
             "functions/api/test-email.js"
+            "functions/api/sync-to-ironsuite.js"
             "public/logo.png"
           )
 
