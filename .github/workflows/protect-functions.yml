@@ -25,6 +25,7 @@ jobs:
             "functions/api/ai-status.js"
             "functions/api/test-email.js"
             "functions/api/sync-to-ironsuite.js"
+            "functions/api/ironsuite-login.js"
             "public/logo.png"
           )
 
@@ -54,6 +55,7 @@ jobs:
             "functions/api/ai-status.js"
             "functions/api/test-email.js"
             "functions/api/sync-to-ironsuite.js"
+            "functions/api/ironsuite-login.js"
             "public/logo.png"
           )
 

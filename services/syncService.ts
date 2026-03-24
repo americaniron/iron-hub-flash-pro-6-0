@@ -1,12 +1,9 @@
 /**
  * IronSuite Sync Service
  *
- * Handles one-way sync from Iron Hub 6.0 → IronSuite (Replit app)
- * Uses the /api/sync-to-ironsuite Cloudflare Pages Function as a proxy.
+ * Handles one-way sync from Iron Hub 6.0 → IronSuite (Replit app).
+ * Routes ALL requests through Cloudflare Pages Function proxies to avoid CORS issues.
  */
-
-const IRONSUITE_URL = 'https://iron-hub-suite.replit.app';
-const SYNC_PROXY_URL = '/api/sync-to-ironsuite';
 
 export interface SyncResult {
   user: string;
@@ -16,240 +13,95 @@ export interface SyncResult {
   results: Record<string, { success: number; failed: number; errors: string[] }>;
 }
 
-export interface IronSuiteAuth {
-  sessionCookie: string;
-  user: { username?: string; email?: string } | null;
-}
-
 /**
- * Log in to IronSuite via popup window.
- * Opens IronSuite login in a popup, waits for the user to complete auth,
- * then extracts the session cookie via postMessage.
+ * Attempt login to IronSuite via our proxy.
+ * Returns the session cookie string if successful.
  */
-export function loginToIronSuite(): Promise<IronSuiteAuth> {
-  return new Promise((resolve, reject) => {
-    const width = 500, height = 650;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
-    const popup = window.open(
-      `${IRONSUITE_URL}/api/login`,
-      'ironsuite-login',
-      `width=${width},height=${height},left=${left},top=${top},popup=yes`
-    );
-
-    if (!popup) {
-      reject(new Error('Popup blocked. Please allow popups for this site.'));
-      return;
-    }
-
-    // Poll the popup to detect when auth completes
-    const pollInterval = setInterval(() => {
-      try {
-        // Check if popup navigated back to the IronSuite app (post-login)
-        if (popup.closed) {
-          clearInterval(pollInterval);
-          reject(new Error('Login cancelled.'));
-          return;
-        }
-
-        const popupUrl = popup.location.href;
-        if (popupUrl && popupUrl.includes('iron-hub-suite.replit.app') && !popupUrl.includes('/api/login') && !popupUrl.includes('replit.com')) {
-          // User has logged in — extract cookies via the popup
-          clearInterval(pollInterval);
-
-          // Inject a script to send us the cookie
-          popup.postMessage({ type: 'IRONSUITE_AUTH_REQUEST' }, IRONSUITE_URL);
-
-          // Give it a moment then try to read the session
-          setTimeout(() => {
-            popup.close();
-            // Since we can't read cross-origin cookies directly, we use our proxy
-            // The user's browser will include cookies when making requests
-            resolve({
-              sessionCookie: 'browser-session', // Placeholder — actual cookie forwarding handled differently
-              user: null,
-            });
-          }, 1500);
-        }
-      } catch (e) {
-        // Cross-origin — popup is on a different domain, keep waiting
-      }
-    }, 500);
-
-    // Timeout after 5 minutes
-    setTimeout(() => {
-      clearInterval(pollInterval);
-      if (!popup.closed) popup.close();
-      reject(new Error('Login timed out.'));
-    }, 300000);
-  });
-}
-
-/**
- * Check if user is authenticated with IronSuite by testing the API
- */
-export async function checkIronSuiteAuth(): Promise<{ authenticated: boolean; user: any }> {
+export async function loginToIronSuite(username: string, password: string): Promise<{ success: boolean; sessionCookie?: string; user?: any; error?: string; hint?: string }> {
   try {
-    const response = await fetch(`${IRONSUITE_URL}/api/auth/me`, {
-      credentials: 'include',
-      headers: { 'Accept': 'application/json' },
+    const response = await fetch('/api/ironsuite-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
     });
-    if (response.ok) {
-      const user = await response.json();
-      return { authenticated: true, user };
-    }
-    return { authenticated: false, user: null };
-  } catch {
-    return { authenticated: false, user: null };
+
+    const data = await response.json();
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message };
   }
 }
 
 /**
- * Sync all data from Iron Hub 6.0 to IronSuite.
- *
- * Uses a direct fetch to IronSuite endpoints with credentials: 'include'
- * so the browser sends session cookies automatically.
+ * Verify a session cookie works by checking /api/auth/me through proxy.
+ */
+export async function verifySessionCookie(sessionCookie: string): Promise<{ valid: boolean; user?: any }> {
+  try {
+    const response = await fetch('/api/sync-to-ironsuite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionCookie, syncData: {}, verifyOnly: true }),
+    });
+
+    // If we get a 200 back even with empty data, the session is valid
+    if (response.ok) {
+      const data = await response.json();
+      return { valid: true, user: data.user };
+    }
+    return { valid: false };
+  } catch {
+    return { valid: false };
+  }
+}
+
+/**
+ * Sync all data from Iron Hub 6.0 → IronSuite via Cloudflare proxy.
+ * The proxy handles auth and CORS — we just send the data + session cookie.
  */
 export async function syncToIronSuite(
   syncData: Record<string, any>,
+  sessionCookie: string,
   onProgress?: (message: string) => void
 ): Promise<SyncResult> {
-  const results: SyncResult = {
-    user: 'unknown',
-    timestamp: new Date().toISOString(),
-    totalSynced: 0,
-    totalFailed: 0,
-    results: {},
-  };
+  onProgress?.('Sending data to sync proxy...');
 
-  // Map of local store names → IronSuite endpoints and field transformers
-  const syncMap: Array<{
-    localKey: string;
-    endpoint: string;
-    label: string;
-    mapper: (item: any) => any;
-  }> = [
-    {
-      localKey: 'accounts',
-      endpoint: '/api/customers',
-      label: 'Customer Accounts',
-      mapper: (a) => ({
-        name: a.company || 'Unnamed',
-        email: a.email || '',
-        phone: a.phone || '',
-        contactName: a.contactName || '',
-        accountNumber: a.accountNumber || '',
-        address: [a.billingAddress, a.billingCity, a.billingState, a.billingZip, a.billingCountry].filter(Boolean).join(', '),
-        notes: a.internalNotes || '',
-        sourceId: a.id || '',
-      }),
-    },
-    {
-      localKey: 'quotes',
-      endpoint: '/api/quotes',
-      label: 'Quotes',
-      mapper: (q) => ({
-        title: q.title || `Quote ${q.id}`,
-        date: q.timestamp || new Date().toISOString(),
-        total: q.total || 0,
-        status: 'draft',
-        customerName: q.payload?.client?.company || '',
-        items: (q.payload?.items || []).map((i: any) => ({
-          partNumber: i.partNo || '',
-          description: i.desc || '',
-          quantity: i.qty || 1,
-          unitPrice: i.unitCost || 0,
-          weight: i.weight || 0,
-        })),
-        sourceId: q.id || '',
-      }),
-    },
-    {
-      localKey: 'invoices',
-      endpoint: '/api/invoices',
-      label: 'Invoices',
-      mapper: (inv) => ({
-        date: inv.date,
-        dueDate: inv.dueDate,
-        clientId: inv.clientId,
-        status: inv.status || 'draft',
-        total: inv.total || 0,
-        taxRate: inv.taxRate || 0,
-        notes: inv.notes || '',
-        items: (inv.items || []).map((i: any) => ({
-          description: i.description || '',
-          quantity: i.quantity || 1,
-          rate: i.rate || 0,
-        })),
-        sourceId: inv.id || '',
-      }),
-    },
-    {
-      localKey: 'payments',
-      endpoint: '/api/payments',
-      label: 'Payments',
-      mapper: (p) => ({
-        invoiceId: p.invoiceId || '',
-        date: p.date,
-        amount: p.amount || 0,
-        method: p.method || 'Other',
-        sourceId: p.id || '',
-      }),
-    },
-    {
-      localKey: 'inventory',
-      endpoint: '/api/items',
-      label: 'Inventory Parts',
-      mapper: (part) => ({
-        sku: part.id || part.partNo || '',
-        name: part.description || '',
-        partNumber: part.partNo || '',
-        cost: part.originalPrice || 0,
-        category: 'Heavy Equipment Parts',
-        sourceId: part.id || '',
-      }),
-    },
-  ];
+  try {
+    const response = await fetch('/api/sync-to-ironsuite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionCookie, syncData }),
+    });
 
-  for (const { localKey, endpoint, label, mapper } of syncMap) {
-    const items = syncData[localKey];
-    if (!items || !Array.isArray(items) || items.length === 0) continue;
-
-    onProgress?.(`Syncing ${items.length} ${label}...`);
-    const sectionResult = { success: 0, failed: 0, errors: [] as string[] };
-
-    for (const item of items) {
-      try {
-        const mapped = mapper(item);
-        const response = await fetch(`${IRONSUITE_URL}${endpoint}`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-          },
-          body: JSON.stringify(mapped),
-        });
-
-        if (response.ok) {
-          sectionResult.success++;
-        } else {
-          sectionResult.failed++;
-          const errText = await response.text().catch(() => '');
-          sectionResult.errors.push(`${label}: HTTP ${response.status}`);
-        }
-      } catch (err: any) {
-        sectionResult.failed++;
-        sectionResult.errors.push(`${label}: ${err.message}`);
-      }
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(errorData.error || `Sync proxy returned ${response.status}`);
     }
 
-    results.results[localKey] = sectionResult;
-    results.totalSynced += sectionResult.success;
-    results.totalFailed += sectionResult.failed;
-    onProgress?.(`${label}: ${sectionResult.success} synced, ${sectionResult.failed} failed`);
-  }
+    const result = await response.json();
 
-  return results;
+    onProgress?.('Sync complete!');
+
+    // Normalize the result to match our SyncResult interface
+    return {
+      user: result.user || 'unknown',
+      timestamp: result.timestamp || new Date().toISOString(),
+      totalSynced: result.totalSynced || 0,
+      totalFailed: result.totalFailed || 0,
+      results: normalizeResults(result.results || {}),
+    };
+  } catch (err: any) {
+    throw new Error(`Sync failed: ${err.message}`);
+  }
+}
+
+function normalizeResults(raw: Record<string, any>): Record<string, { success: number; failed: number; errors: string[] }> {
+  const normalized: Record<string, { success: number; failed: number; errors: string[] }> = {};
+  for (const [key, val] of Object.entries(raw)) {
+    normalized[key] = {
+      success: (val as any).success || 0,
+      failed: (val as any).failed || 0,
+      errors: (val as any).errors || [],
+    };
+  }
+  return normalized;
 }
