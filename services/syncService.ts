@@ -45,7 +45,7 @@ export async function syncToIronSuite(
   password: string,
   onProgress?: (message: string) => void
 ): Promise<SyncResult> {
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 15;
 
   const results: SyncResult = {
     user: 'unknown',

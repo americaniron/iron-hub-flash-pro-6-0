@@ -150,36 +150,47 @@ function mapInventoryItem(part) {
   };
 }
 
-// --- Push data to IronSuite ---
+// --- Push data to IronSuite (parallel, 5 at a time) ---
 
 async function pushToIronSuite(endpoint, items, cookieString, mapper) {
   const results = { success: 0, failed: 0, errors: [] };
+  const CONCURRENCY = 5;
 
-  for (const item of items) {
-    try {
-      const mapped = mapper(item);
-      const response = await fetch(`${IRONSUITE_BASE}${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cookie': cookieString,
-        },
-        body: JSON.stringify(mapped),
-      });
+  // Process items in parallel groups of CONCURRENCY
+  for (let i = 0; i < items.length; i += CONCURRENCY) {
+    const chunk = items.slice(i, i + CONCURRENCY);
+    const promises = chunk.map(async (item) => {
+      try {
+        const mapped = mapper(item);
+        const response = await fetch(`${IRONSUITE_BASE}${endpoint}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Cookie': cookieString,
+          },
+          body: JSON.stringify(mapped),
+        });
 
-      if (response.ok) {
+        if (response.ok) {
+          return { ok: true };
+        } else {
+          const errText = await response.text().catch(() => '');
+          return { ok: false, error: `${response.status} - ${errText.substring(0, 80)}` };
+        }
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    });
+
+    const settled = await Promise.all(promises);
+    for (const r of settled) {
+      if (r.ok) {
         results.success++;
       } else {
-        const errText = await response.text().catch(() => 'Unknown error');
         results.failed++;
-        if (results.errors.length < 5) {
-          results.errors.push(`${endpoint}: ${response.status} - ${errText.substring(0, 100)}`);
+        if (results.errors.length < 3) {
+          results.errors.push(`${endpoint}: ${r.error}`);
         }
-      }
-    } catch (err) {
-      results.failed++;
-      if (results.errors.length < 5) {
-        results.errors.push(`${endpoint}: ${err.message}`);
       }
     }
   }
