@@ -1,14 +1,11 @@
 /**
  * Cloudflare Pages Function: Sync data from Iron Hub 6.0 → IronSuite (Replit)
  *
- * This proxy function receives data from the 6.0 frontend and pushes it
- * to the IronSuite Replit app's REST API endpoints.
- *
- * Flow:
- * 1. Frontend sends all IndexedDB data + IronSuite session cookie
- * 2. This function maps 6.0 data types → IronSuite API formats
- * 3. POSTs to each IronSuite endpoint with the session cookie
- * 4. Returns a summary of what was synced
+ * Handles login + data sync in a SINGLE request to avoid cookie extraction issues.
+ * The frontend sends username/password + data batch, and this proxy:
+ * 1. Logs in to IronSuite, captures the session cookie server-side
+ * 2. Pushes the data batch using that cookie
+ * 3. Returns sync results
  */
 
 const IRONSUITE_BASE = 'https://iron-hub-suite.replit.app';
@@ -23,7 +20,32 @@ export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-// --- Data Mappers: Convert 6.0 types → IronSuite API types ---
+// --- Extract session cookie from a fetch Response ---
+function extractCookies(response) {
+  let cookies = [];
+
+  // Method 1: getSetCookie (Cloudflare Workers)
+  try {
+    if (response.headers.getSetCookie) {
+      cookies = response.headers.getSetCookie();
+    }
+  } catch (e) {}
+
+  // Method 2: get('set-cookie') fallback
+  if (cookies.length === 0) {
+    const raw = response.headers.get('set-cookie');
+    if (raw) {
+      cookies = raw.split(/,(?=\s*\w+=)/);
+    }
+  }
+
+  return cookies
+    .map(c => c.split(';')[0].trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+// --- Data Mappers ---
 
 function mapAccountToCustomer(account) {
   return {
@@ -128,9 +150,9 @@ function mapInventoryItem(part) {
   };
 }
 
-// --- Push data to a single IronSuite endpoint ---
+// --- Push data to IronSuite ---
 
-async function pushToIronSuite(endpoint, items, sessionCookie, mapper) {
+async function pushToIronSuite(endpoint, items, cookieString, mapper) {
   const results = { success: 0, failed: 0, errors: [] };
 
   for (const item of items) {
@@ -140,7 +162,7 @@ async function pushToIronSuite(endpoint, items, sessionCookie, mapper) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Cookie': sessionCookie,
+          'Cookie': cookieString,
         },
         body: JSON.stringify(mapped),
       });
@@ -150,11 +172,15 @@ async function pushToIronSuite(endpoint, items, sessionCookie, mapper) {
       } else {
         const errText = await response.text().catch(() => 'Unknown error');
         results.failed++;
-        results.errors.push(`${endpoint}: ${response.status} - ${errText.substring(0, 100)}`);
+        if (results.errors.length < 5) {
+          results.errors.push(`${endpoint}: ${response.status} - ${errText.substring(0, 100)}`);
+        }
       }
     } catch (err) {
       results.failed++;
-      results.errors.push(`${endpoint}: ${err.message}`);
+      if (results.errors.length < 5) {
+        results.errors.push(`${endpoint}: ${err.message}`);
+      }
     }
   }
 
@@ -166,11 +192,11 @@ async function pushToIronSuite(endpoint, items, sessionCookie, mapper) {
 export async function onRequestPost(context) {
   try {
     const data = await context.request.json();
-    const { sessionCookie, syncData } = data;
+    const { username, password, syncData } = data;
 
-    if (!sessionCookie) {
+    if (!username || !password) {
       return new Response(JSON.stringify({
-        error: 'Missing IronSuite session. Please log in to IronSuite first.'
+        error: 'Missing username or password. Please enter your IronSuite credentials.'
       }), {
         status: 401,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -186,14 +212,45 @@ export async function onRequestPost(context) {
       });
     }
 
-    // First, verify the session is valid
+    // Step 1: Login to IronSuite and capture the session cookie
+    const loginResponse = await fetch(`${IRONSUITE_BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      redirect: 'manual',
+    });
+
+    if (!loginResponse.ok && loginResponse.status !== 302 && loginResponse.status !== 301) {
+      const errBody = await loginResponse.text().catch(() => '');
+      let errMsg = 'Login failed';
+      try { errMsg = JSON.parse(errBody).message || errMsg; } catch (e) {}
+      return new Response(JSON.stringify({
+        error: `IronSuite login failed: ${errMsg}`,
+        debug: { status: loginResponse.status }
+      }), {
+        status: 401,
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const cookieString = extractCookies(loginResponse);
+
+    // Step 2: Verify the session works
     const authCheck = await fetch(`${IRONSUITE_BASE}/api/auth/me`, {
-      headers: { 'Cookie': sessionCookie, 'Accept': 'application/json' },
+      headers: { 'Cookie': cookieString, 'Accept': 'application/json' },
     });
 
     if (!authCheck.ok) {
+      // Cookie extraction might have failed — return diagnostic info
       return new Response(JSON.stringify({
-        error: 'IronSuite session expired or invalid. Please log in again.'
+        error: 'Login succeeded but session cookie could not be used. Cookie extraction may have failed.',
+        debug: {
+          loginStatus: loginResponse.status,
+          cookieLength: cookieString.length,
+          cookieEmpty: cookieString === '',
+          authMeStatus: authCheck.status,
+          authMeBody: (await authCheck.text().catch(() => '')).substring(0, 200),
+        }
       }), {
         status: 401,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -202,45 +259,40 @@ export async function onRequestPost(context) {
 
     const authUser = await authCheck.json().catch(() => null);
 
-    // Sync each data type
+    // Step 3: Sync each data type
     const syncResults = {
       user: authUser?.username || authUser?.email || 'unknown',
       timestamp: new Date().toISOString(),
       results: {},
     };
 
-    // 1. Sync Accounts → Customers
     if (syncData.accounts?.length > 0) {
-      syncResults.results.customers = await pushToIronSuite(
-        '/api/customers', syncData.accounts, sessionCookie, mapAccountToCustomer
+      syncResults.results.accounts = await pushToIronSuite(
+        '/api/customers', syncData.accounts, cookieString, mapAccountToCustomer
       );
     }
 
-    // 2. Sync Quotes
     if (syncData.quotes?.length > 0) {
       syncResults.results.quotes = await pushToIronSuite(
-        '/api/quotes', syncData.quotes, sessionCookie, mapQuoteToIronSuite
+        '/api/quotes', syncData.quotes, cookieString, mapQuoteToIronSuite
       );
     }
 
-    // 3. Sync Invoices
     if (syncData.invoices?.length > 0) {
       syncResults.results.invoices = await pushToIronSuite(
-        '/api/invoices', syncData.invoices, sessionCookie, mapInvoiceToIronSuite
+        '/api/invoices', syncData.invoices, cookieString, mapInvoiceToIronSuite
       );
     }
 
-    // 4. Sync Payments
     if (syncData.payments?.length > 0) {
       syncResults.results.payments = await pushToIronSuite(
-        '/api/payments', syncData.payments, sessionCookie, mapPaymentToIronSuite
+        '/api/payments', syncData.payments, cookieString, mapPaymentToIronSuite
       );
     }
 
-    // 5. Sync Inventory → Items
     if (syncData.inventory?.length > 0) {
-      syncResults.results.items = await pushToIronSuite(
-        '/api/items', syncData.inventory, sessionCookie, mapInventoryItem
+      syncResults.results.inventory = await pushToIronSuite(
+        '/api/items', syncData.inventory, cookieString, mapInventoryItem
       );
     }
 

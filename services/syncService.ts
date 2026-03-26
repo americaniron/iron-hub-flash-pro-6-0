@@ -2,8 +2,8 @@
  * IronSuite Sync Service
  *
  * Handles one-way sync from Iron Hub 6.0 → IronSuite (Replit app).
- * Routes ALL requests through Cloudflare Pages Function proxy.
- * Sends data in batches per category to avoid HTTP 413 (payload too large).
+ * Routes through Cloudflare proxy which handles login + sync in one request.
+ * No cookie extraction needed — credentials are sent with each batch.
  */
 
 export interface SyncResult {
@@ -15,16 +15,20 @@ export interface SyncResult {
 }
 
 /**
- * Attempt login to IronSuite via our proxy.
+ * Verify IronSuite credentials by doing a test sync with empty data.
  */
-export async function loginToIronSuite(username: string, password: string): Promise<{ success: boolean; sessionCookie?: string; user?: any; error?: string; note?: string; debug?: any }> {
+export async function verifyIronSuiteLogin(username: string, password: string): Promise<{ success: boolean; user?: any; error?: string }> {
   try {
-    const response = await fetch('/api/ironsuite-login', {
+    const response = await fetch('/api/sync-to-ironsuite', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, syncData: {} }),
     });
-    return await response.json();
+    const data = await response.json();
+    if (response.ok) {
+      return { success: true, user: data.user };
+    }
+    return { success: false, error: data.error || `HTTP ${response.status}` };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -32,12 +36,13 @@ export async function loginToIronSuite(username: string, password: string): Prom
 
 /**
  * Sync all data from Iron Hub 6.0 → IronSuite via Cloudflare proxy.
- * Sends each data category as a separate request to avoid 413 errors.
- * Further chunks large categories (like inventory) into batches of 50.
+ * Sends credentials + data batch per category.
+ * The proxy handles login + push in a single server-side request.
  */
 export async function syncToIronSuite(
   syncData: Record<string, any>,
-  sessionCookie: string,
+  username: string,
+  password: string,
   onProgress?: (message: string) => void
 ): Promise<SyncResult> {
   const BATCH_SIZE = 50;
@@ -50,7 +55,6 @@ export async function syncToIronSuite(
     results: {},
   };
 
-  // Categories to sync
   const categories = [
     { key: 'accounts', label: 'Accounts' },
     { key: 'quotes', label: 'Quotes' },
@@ -80,14 +84,13 @@ export async function syncToIronSuite(
       onProgress?.(`Syncing ${batchLabel}... (${batch.length} items)`);
 
       try {
-        // Send only this category's batch
         const payload: Record<string, any> = {};
         payload[key] = batch;
 
         const response = await fetch('/api/sync-to-ironsuite', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionCookie, syncData: payload }),
+          body: JSON.stringify({ username, password, syncData: payload }),
         });
 
         if (!response.ok) {
@@ -99,7 +102,6 @@ export async function syncToIronSuite(
 
         const batchResult = await response.json();
 
-        // Aggregate results from this batch
         for (const [, val] of Object.entries(batchResult.results || {})) {
           const v = val as any;
           categoryResult.success += v.success || 0;
@@ -107,11 +109,9 @@ export async function syncToIronSuite(
           if (v.errors?.length) categoryResult.errors.push(...v.errors.slice(0, 3));
         }
 
-        // Update user info if available
         if (batchResult.user && batchResult.user !== 'unknown') {
           results.user = batchResult.user;
         }
-
       } catch (err: any) {
         categoryResult.failed += batch.length;
         categoryResult.errors.push(`${batchLabel}: ${err.message}`);

@@ -9,7 +9,7 @@ import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
 import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
-import { syncToIronSuite, loginToIronSuite, SyncResult } from './services/syncService.ts';
+import { syncToIronSuite, verifyIronSuiteLogin, SyncResult } from './services/syncService.ts';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -125,12 +125,11 @@ const App: React.FC = () => {
   const [syncProgress, setSyncProgress] = useState<string>('');
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [ironSuiteSession, setIronSuiteSession] = useState<string>('');
   const [ironSuiteUser, setIronSuiteUser] = useState<string>('');
   const [ironSuitePass, setIronSuitePass] = useState<string>('');
+  const [ironSuiteVerified, setIronSuiteVerified] = useState(false);
   const [loginError, setLoginError] = useState<string>('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'cookie'>('login');
 
   const [client, setClient] = useState<ClientInfo>({ 
     accountNumber: '', company: '', contactName: '', email: '', phone: '',
@@ -811,14 +810,10 @@ const App: React.FC = () => {
     setIsLoggingIn(true);
     setLoginError('');
     try {
-      const result = await loginToIronSuite(ironSuiteUser, ironSuitePass);
-      if (result.success && result.sessionCookie) {
-        setIronSuiteSession(result.sessionCookie);
+      const result = await verifyIronSuiteLogin(ironSuiteUser, ironSuitePass);
+      if (result.success) {
+        setIronSuiteVerified(true);
         setLoginError('');
-      } else if (result.success && !result.sessionCookie) {
-        // Login OK but no cookie returned — show debug info
-        const note = result.note || 'Login succeeded but no session cookie was returned.';
-        setLoginError(note + (result.debug ? ` (Status: ${result.debug.status}, Cookies: ${result.debug.hasCookies})` : ''));
       } else {
         setLoginError(result.error || 'Login failed. Check your credentials.');
       }
@@ -830,8 +825,8 @@ const App: React.FC = () => {
   };
 
   const handleSyncToIronSuite = async () => {
-    if (!user || !ironSuiteSession) {
-      setSyncProgress('Please provide your IronSuite session cookie first.');
+    if (!user || !ironSuiteUser || !ironSuitePass) {
+      setSyncProgress('Please enter your IronSuite credentials first.');
       return;
     }
     setIsSyncing(true);
@@ -839,8 +834,8 @@ const App: React.FC = () => {
     setSyncResult(null);
     try {
       const data = await dbService.exportAllUserData(user.username);
-      setSyncProgress('Pushing data through sync proxy...');
-      const result = await syncToIronSuite(data, ironSuiteSession, (msg) => setSyncProgress(msg));
+      setSyncProgress('Logging in and syncing via proxy...');
+      const result = await syncToIronSuite(data, ironSuiteUser, ironSuitePass, (msg) => setSyncProgress(msg));
       setSyncResult(result);
       setSyncProgress('Sync complete!');
     } catch (err: any) {
@@ -1177,39 +1172,24 @@ const App: React.FC = () => {
 
                 {/* Auth Section */}
                 <div className="space-y-3">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">IronSuite Authentication</p>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">IronSuite Login</p>
 
-                  {ironSuiteSession ? (
+                  {ironSuiteVerified ? (
                     <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200/50 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>
-                        <span className="text-[11px] font-black text-emerald-800">Session Connected</span>
+                        <span className="text-[11px] font-black text-emerald-800">Credentials Verified — Ready to Sync</span>
                       </div>
-                      <button onClick={() => { setIronSuiteSession(''); setLoginError(''); }} className="text-[9px] font-bold text-emerald-600 hover:text-emerald-800 uppercase tracking-wider">Disconnect</button>
+                      <button onClick={() => { setIronSuiteVerified(false); setLoginError(''); }} className="text-[9px] font-bold text-emerald-600 hover:text-emerald-800 uppercase tracking-wider">Change</button>
                     </div>
                   ) : (
-                    <div className="space-y-3">
-                      {/* Mode Toggle */}
-                      <div className="flex gap-2">
-                        <button onClick={() => setAuthMode('login')} className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${authMode === 'login' ? 'bg-cat-black text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Username/Password</button>
-                        <button onClick={() => setAuthMode('cookie')} className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${authMode === 'cookie' ? 'bg-cat-black text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Session Cookie</button>
-                      </div>
-
-                      {authMode === 'login' ? (
-                        <div className="space-y-2">
-                          <input type="text" placeholder="IronSuite Username" value={ironSuiteUser} onChange={e => setIronSuiteUser(e.target.value)} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
-                          <input type="password" placeholder="IronSuite Password" value={ironSuitePass} onChange={e => setIronSuitePass(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleIronSuiteLogin()} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
-                          <button onClick={handleIronSuiteLogin} disabled={isLoggingIn} className="w-full py-2.5 bg-cat-black hover:bg-slate-800 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-2">
-                            {isLoggingIn ? <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Connecting...</> : 'Connect to IronSuite'}
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <p className="text-[9px] font-bold text-slate-500 leading-relaxed">Open <a href="https://iron-hub-suite.replit.app" target="_blank" rel="noopener" className="underline text-emerald-600 hover:text-emerald-800 font-black">IronSuite</a>, log in, then open DevTools (F12) &rarr; Application &rarr; Cookies &rarr; copy the <span className="font-black">connect.sid</span> value and paste below.</p>
-                          <input type="text" placeholder="Paste session cookie value here..." value={ironSuiteSession} onChange={e => setIronSuiteSession(e.target.value)} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
-                        </div>
-                      )}
-
+                    <div className="space-y-2">
+                      <p className="text-[9px] font-bold text-slate-500">Enter your IronSuite Admin Login credentials (same as iron-hub-suite.replit.app)</p>
+                      <input type="text" placeholder="Username or Email" value={ironSuiteUser} onChange={e => setIronSuiteUser(e.target.value)} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
+                      <input type="password" placeholder="Password" value={ironSuitePass} onChange={e => setIronSuitePass(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleIronSuiteLogin()} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
+                      <button onClick={handleIronSuiteLogin} disabled={isLoggingIn} className="w-full py-2.5 bg-cat-black hover:bg-slate-800 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-2">
+                        {isLoggingIn ? <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Verifying...</> : 'Verify & Connect'}
+                      </button>
                       {loginError && (
                         <div className="bg-red-50 rounded-xl p-3 border border-red-200/50">
                           <p className="text-[10px] font-bold text-red-700">{loginError}</p>
@@ -1223,14 +1203,14 @@ const App: React.FC = () => {
               {/* Footer */}
               <div className="px-8 py-5 bg-slate-50 border-t border-slate-200/60 flex justify-between">
                 <button
-                  onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); setLoginError(''); }}
+                  onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); setLoginError(''); setIronSuiteVerified(false); }}
                   className="px-6 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 transition-colors"
                 >
                   Close
                 </button>
                 <button
                   onClick={handleSyncToIronSuite}
-                  disabled={isSyncing || !ironSuiteSession}
+                  disabled={isSyncing || !ironSuiteVerified}
                   className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none flex items-center gap-2"
                 >
                   {isSyncing ? (
