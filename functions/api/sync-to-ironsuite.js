@@ -150,19 +150,33 @@ function mapInventoryItem(part) {
   };
 }
 
-// --- Push data to IronSuite (parallel, 5 at a time) ---
+// --- Fetch with timeout ---
+async function fetchWithTimeout(url, opts, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(timer);
+    return resp;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') throw new Error('Request timed out');
+    throw err;
+  }
+}
+
+// --- Push data to IronSuite (parallel, 5 at a time, 8s timeout each) ---
 
 async function pushToIronSuite(endpoint, items, cookieString, mapper) {
   const results = { success: 0, failed: 0, errors: [] };
   const CONCURRENCY = 5;
 
-  // Process items in parallel groups of CONCURRENCY
   for (let i = 0; i < items.length; i += CONCURRENCY) {
     const chunk = items.slice(i, i + CONCURRENCY);
     const promises = chunk.map(async (item) => {
       try {
         const mapped = mapper(item);
-        const response = await fetch(`${IRONSUITE_BASE}${endpoint}`, {
+        const response = await fetchWithTimeout(`${IRONSUITE_BASE}${endpoint}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
