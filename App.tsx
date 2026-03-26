@@ -9,7 +9,7 @@ import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
 import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
-import { syncToIronSuite, verifyIronSuiteLogin, SyncResult } from './services/syncService.ts';
+import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -122,14 +122,7 @@ const App: React.FC = () => {
   const [templates, setTemplates] = useState<InvoiceTemplate[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('stable');
   const [showSyncModal, setShowSyncModal] = useState(false);
-  const [syncProgress, setSyncProgress] = useState<string>('');
-  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [ironSuiteUser, setIronSuiteUser] = useState<string>('');
-  const [ironSuitePass, setIronSuitePass] = useState<string>('');
-  const [ironSuiteVerified, setIronSuiteVerified] = useState(false);
-  const [loginError, setLoginError] = useState<string>('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [exportedFiles, setExportedFiles] = useState<string[]>([]);
 
   const [client, setClient] = useState<ClientInfo>({ 
     accountNumber: '', company: '', contactName: '', email: '', phone: '',
@@ -805,44 +798,49 @@ const App: React.FC = () => {
     }
   };
 
-  const handleIronSuiteLogin = async () => {
-    if (!ironSuiteUser || !ironSuitePass) { setLoginError('Enter username and password.'); return; }
-    setIsLoggingIn(true);
-    setLoginError('');
+  const handleExportForIronSuite = (category: string) => {
     try {
-      const result = await verifyIronSuiteLogin(ironSuiteUser, ironSuitePass);
-      if (result.success) {
-        setIronSuiteVerified(true);
-        setLoginError('');
-      } else {
-        setLoginError(result.error || 'Login failed. Check your credentials.');
+      switch (category) {
+        case 'customers':
+          exportCustomersForIronSuite(customerAccounts);
+          break;
+        case 'contacts':
+          exportContactsForIronSuite(customerAccounts);
+          break;
+        case 'quotes':
+          exportQuotesForIronSuite(quoteHistory);
+          break;
+        case 'invoices':
+          exportInvoicesForIronSuite(invoices, customerAccounts, payments);
+          break;
+        case 'inventory':
+          exportInventoryForIronSuite(inventory);
+          break;
+      }
+      if (!exportedFiles.includes(category)) {
+        setExportedFiles(prev => [...prev, category]);
       }
     } catch (err: any) {
-      setLoginError(err.message);
-    } finally {
-      setIsLoggingIn(false);
+      alert(`Export failed: ${err.message}`);
     }
   };
 
-  const handleSyncToIronSuite = async () => {
-    if (!user || !ironSuiteUser || !ironSuitePass) {
-      setSyncProgress('Please enter your IronSuite credentials first.');
-      return;
+  const handleExportAllForIronSuite = () => {
+    const categories = [
+      { key: 'customers', data: customerAccounts },
+      { key: 'contacts', data: customerAccounts },
+      { key: 'quotes', data: quoteHistory },
+      { key: 'invoices', data: invoices },
+      { key: 'inventory', data: inventory },
+    ];
+    const exported: string[] = [];
+    for (const cat of categories) {
+      if (cat.data.length > 0) {
+        handleExportForIronSuite(cat.key);
+        exported.push(cat.key);
+      }
     }
-    setIsSyncing(true);
-    setSyncProgress('Collecting data from Iron Hub...');
-    setSyncResult(null);
-    try {
-      const data = await dbService.exportAllUserData(user.username);
-      setSyncProgress('Logging in and syncing via proxy...');
-      const result = await syncToIronSuite(data, ironSuiteUser, ironSuitePass, (msg) => setSyncProgress(msg));
-      setSyncResult(result);
-      setSyncProgress('Sync complete!');
-    } catch (err: any) {
-      setSyncProgress(`Sync failed: ${err.message}`);
-    } finally {
-      setIsSyncing(false);
-    }
+    setExportedFiles(exported);
   };
 
   const handleImportData = (file: File) => {
@@ -1082,7 +1080,7 @@ const App: React.FC = () => {
           />
         </div>
 
-        {/* IronSuite Sync Modal */}
+        {/* IronSuite Export Modal */}
         {showSyncModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center animate-in fade-in duration-200">
             <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg mx-4 overflow-hidden border border-slate-200/60">
@@ -1091,11 +1089,11 @@ const App: React.FC = () => {
                 <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl -mr-20 -mt-20"></div>
                 <div className="relative z-10 flex items-center justify-between">
                   <div>
-                    <h2 className="text-xl font-black uppercase tracking-tight text-white">Sync to IronSuite</h2>
-                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Push all data to your IronSuite platform</p>
+                    <h2 className="text-xl font-black uppercase tracking-tight text-white">Export to IronSuite</h2>
+                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Download CSVs for IronSuite Data Import Center</p>
                   </div>
                   <button
-                    onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); }}
+                    onClick={() => { setShowSyncModal(false); setExportedFiles([]); }}
                     className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -1105,125 +1103,83 @@ const App: React.FC = () => {
 
               {/* Body */}
               <div className="p-8 space-y-6">
-                {/* Data Summary */}
-                <div className="space-y-3">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Data to Sync</p>
-                  <div className="grid grid-cols-3 gap-3">
-                    {[
-                      { label: 'Accounts', count: customerAccounts.length, icon: '👥' },
-                      { label: 'Quotes', count: quoteHistory.length, icon: '📋' },
-                      { label: 'Invoices', count: invoices.length, icon: '📄' },
-                      { label: 'Payments', count: payments.length, icon: '💰' },
-                      { label: 'Inventory', count: inventory.length, icon: '📦' },
-                      { label: 'Templates', count: templates.length, icon: '📝' },
-                    ].map(item => (
-                      <div key={item.label} className="bg-slate-50 rounded-xl p-3 text-center border border-slate-100">
-                        <div className="text-lg">{item.icon}</div>
-                        <div className="text-[18px] font-black text-cat-black">{item.count}</div>
-                        <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
+                {/* Instructions */}
+                <div className="bg-blue-50 rounded-xl p-4 border border-blue-200/50">
+                  <p className="text-[11px] font-black text-blue-900 uppercase tracking-wider mb-1">How It Works</p>
+                  <p className="text-[10px] font-bold text-blue-700 leading-relaxed">
+                    Download CSV files below, then import them into IronSuite via
+                    <span className="font-black"> Settings &rarr; Data Import Center</span>.
+                    Each file matches IronSuite's expected column format.
+                  </p>
                 </div>
 
-                {/* Destination */}
-                <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200/50 flex items-center gap-4">
-                  <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center flex-shrink-0">
-                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
-                  </div>
-                  <div>
-                    <p className="text-[11px] font-black text-emerald-900 uppercase tracking-wider">Target: IronSuite Platform</p>
-                    <p className="text-[10px] font-bold text-emerald-700">iron-hub-suite.replit.app</p>
-                  </div>
-                </div>
-
-                {/* Progress */}
-                {syncProgress && (
-                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/50">
-                    <div className="flex items-center gap-3">
-                      {isSyncing && <div className="w-4 h-4 border-2 border-emerald-600/30 border-t-emerald-600 rounded-full animate-spin flex-shrink-0"></div>}
-                      {!isSyncing && syncResult && <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>}
-                      <p className="text-[11px] font-bold text-slate-600">{syncProgress}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Results */}
-                {syncResult && (
-                  <div className="space-y-3">
-                    <div className="flex gap-3">
-                      <div className="flex-1 bg-emerald-50 rounded-xl p-3 text-center border border-emerald-200/50">
-                        <div className="text-[22px] font-black text-emerald-700">{syncResult.totalSynced}</div>
-                        <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-600">Synced</div>
-                      </div>
-                      <div className="flex-1 bg-red-50 rounded-xl p-3 text-center border border-red-200/50">
-                        <div className="text-[22px] font-black text-red-700">{syncResult.totalFailed}</div>
-                        <div className="text-[9px] font-bold uppercase tracking-widest text-red-600">Failed</div>
-                      </div>
-                    </div>
-                    {Object.entries(syncResult.results).map(([key, val]: [string, any]) => (
-                      <div key={key} className="flex justify-between items-center text-[10px] px-2">
-                        <span className="font-bold uppercase tracking-wider text-slate-500">{key}</span>
-                        <span className="font-black text-cat-black">{val.success} ok / {val.failed} failed</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Auth Section */}
+                {/* Export Buttons */}
                 <div className="space-y-3">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">IronSuite Login</p>
-
-                  {ironSuiteVerified ? (
-                    <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200/50 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>
-                        <span className="text-[11px] font-black text-emerald-800">Credentials Verified — Ready to Sync</span>
-                      </div>
-                      <button onClick={() => { setIronSuiteVerified(false); setLoginError(''); }} className="text-[9px] font-bold text-emerald-600 hover:text-emerald-800 uppercase tracking-wider">Change</button>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <p className="text-[9px] font-bold text-slate-500">Enter your IronSuite Admin Login credentials (same as iron-hub-suite.replit.app)</p>
-                      <input type="text" placeholder="Username or Email" value={ironSuiteUser} onChange={e => setIronSuiteUser(e.target.value)} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
-                      <input type="password" placeholder="Password" value={ironSuitePass} onChange={e => setIronSuitePass(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleIronSuiteLogin()} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
-                      <button onClick={handleIronSuiteLogin} disabled={isLoggingIn} className="w-full py-2.5 bg-cat-black hover:bg-slate-800 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-2">
-                        {isLoggingIn ? <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Verifying...</> : 'Verify & Connect'}
-                      </button>
-                      {loginError && (
-                        <div className="bg-red-50 rounded-xl p-3 border border-red-200/50">
-                          <p className="text-[10px] font-bold text-red-700">{loginError}</p>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Download CSV Files</p>
+                  {[
+                    { key: 'customers', label: 'Customer Organizations', count: customerAccounts.length, icon: '🏢', desc: 'Company names, addresses, contacts' },
+                    { key: 'contacts', label: 'CRM Contacts', count: customerAccounts.length, icon: '👤', desc: 'First/last name, email, phone, company' },
+                    { key: 'quotes', label: 'Past Quotes', count: quoteHistory.length, icon: '📋', desc: 'Quote numbers, line items, totals' },
+                    { key: 'invoices', label: 'Past Invoices', count: invoices.length, icon: '📄', desc: 'Invoice numbers, line items, payments' },
+                    { key: 'inventory', label: 'Inventory Items', count: inventory.length, icon: '📦', desc: 'Part numbers, descriptions, prices' },
+                  ].map(item => (
+                    <div key={item.key} className="flex items-center justify-between bg-slate-50 rounded-xl p-4 border border-slate-100 hover:border-slate-200 transition-all">
+                      <div className="flex items-center gap-3">
+                        <div className="text-xl">{item.icon}</div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-black text-cat-black">{item.label}</span>
+                            <span className="text-[9px] font-bold text-slate-400 bg-slate-200/60 px-2 py-0.5 rounded-full">{item.count}</span>
+                          </div>
+                          <p className="text-[9px] font-bold text-slate-400 mt-0.5">{item.desc}</p>
                         </div>
-                      )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {exportedFiles.includes(item.key) && (
+                          <svg className="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>
+                        )}
+                        <button
+                          onClick={() => handleExportForIronSuite(item.key)}
+                          disabled={item.count === 0}
+                          className="px-4 py-2 bg-cat-black hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 text-white text-[9px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center gap-1.5"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                          CSV
+                        </button>
+                      </div>
                     </div>
-                  )}
+                  ))}
                 </div>
+
+                {/* Exported confirmation */}
+                {exportedFiles.length > 0 && (
+                  <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200/50">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"></path></svg>
+                      <p className="text-[11px] font-black text-emerald-800">
+                        {exportedFiles.length} file{exportedFiles.length > 1 ? 's' : ''} downloaded!
+                        <span className="font-bold text-emerald-600"> Now import them into IronSuite.</span>
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Footer */}
               <div className="px-8 py-5 bg-slate-50 border-t border-slate-200/60 flex justify-between">
                 <button
-                  onClick={() => { setShowSyncModal(false); setSyncResult(null); setSyncProgress(''); setLoginError(''); setIronSuiteVerified(false); }}
+                  onClick={() => { setShowSyncModal(false); setExportedFiles([]); }}
                   className="px-6 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 transition-colors"
                 >
                   Close
                 </button>
                 <button
-                  onClick={handleSyncToIronSuite}
-                  disabled={isSyncing || !ironSuiteVerified}
+                  onClick={handleExportAllForIronSuite}
+                  disabled={customerAccounts.length === 0 && quoteHistory.length === 0 && invoices.length === 0 && inventory.length === 0}
                   className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none flex items-center gap-2"
                 >
-                  {isSyncing ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                      Syncing...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                      Start Sync
-                    </>
-                  )}
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                  Export All CSVs
                 </button>
               </div>
             </div>
