@@ -1,0 +1,7 @@
+# Cloudflare Pages configuration for Iron Hub Pro 6.0
+# D1 database binding for persistent server-side data storage
+
+[[d1_databases]]
+binding = "DB"
+database_name = "iron-hub-pro-db"
+database_id = "3248a67b-7640-48a3-bd59-cc0a8b6d4c45"
