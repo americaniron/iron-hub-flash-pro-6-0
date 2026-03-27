@@ -86,6 +86,18 @@ async function serverGetAll(username: string): Promise<Record<string, any> | nul
   }
 }
 
+async function serverDelete(username: string, store: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function serverSetAll(username: string, stores: Record<string, any>): Promise<boolean> {
   try {
     const res = await fetch(API_BASE, {
@@ -469,17 +481,18 @@ export const dbService = {
     for (const [store, storeData] of Object.entries(data)) {
       if (!STORE_NAMES.includes(store)) continue;
 
-      let serverWritten = false;
       const estSize = estimateSize(storeData);
 
       if (isUp && estSize < D1_MAX_STORE_SIZE) {
         // Small enough for D1 — write to server
-        serverWritten = await serverSet(username, store, storeData);
-        if (serverWritten) {
+        const ok = await serverSet(username, store, storeData);
+        if (ok) {
           console.log(`[import] ${store}: saved to cloud (~${(estSize / 1024).toFixed(0)}KB)`);
         }
-      } else if (estSize >= D1_MAX_STORE_SIZE) {
-        console.log(`[import] ${store}: ~${(estSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally`);
+      } else if (isUp && estSize >= D1_MAX_STORE_SIZE) {
+        // Too large for D1 — DELETE any stale D1 entry so getData doesn't return old server data
+        console.log(`[import] ${store}: ~${(estSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally only`);
+        serverDelete(username, store).catch(() => {});
       }
 
       // Always write to IndexedDB (critical for large stores, and as cache for small ones)
