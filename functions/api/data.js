@@ -1,0 +1,217 @@
+// ---------------------------------------------------------------------------
+// Cloudflare Pages Function — /api/data
+// Server-side persistent data storage using Cloudflare D1 (SQLite)
+// Replaces browser-only IndexedDB with permanent cloud storage
+// D1 binding name: DB (configured in Cloudflare Pages dashboard)
+// ---------------------------------------------------------------------------
+
+const CORS_HEADERS = {
+  'Content-Type': 'application/json',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+const VALID_STORES = [
+  'accounts', 'quotes', 'invoices', 'payments', 'credits',
+  'drafts', 'recurring_invoices', 'templates', 'parts_image_pool', 'inventory'
+];
+
+// Handle CORS preflight
+export async function onRequestOptions() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+// GET /api/data?username=xxx&store=yyy  — Read data for a user+store
+export async function onRequestGet(context) {
+  const { env } = context;
+  const url = new URL(context.request.url);
+  const username = url.searchParams.get('username');
+  const store = url.searchParams.get('store');
+
+  if (!username) {
+    return Response.json({ error: 'Missing username parameter' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  const DB = env.DB;
+  if (!DB) {
+    return Response.json({ error: 'D1 database not bound. Please configure DB binding in Cloudflare Pages settings.' }, { status: 500, headers: CORS_HEADERS });
+  }
+
+  try {
+    // If store is specified, return just that store's data
+    if (store) {
+      if (!VALID_STORES.includes(store)) {
+        return Response.json({ error: `Invalid store: ${store}` }, { status: 400, headers: CORS_HEADERS });
+      }
+
+      const row = await DB.prepare(
+        'SELECT data FROM user_data WHERE username = ? AND store_name = ?'
+      ).bind(username, store).first();
+
+      const data = row ? JSON.parse(row.data) : getDefaultForStore(store);
+      return Response.json({ success: true, data }, { headers: CORS_HEADERS });
+    }
+
+    // No store specified — return ALL stores for this user (bulk export)
+    const rows = await DB.prepare(
+      'SELECT store_name, data FROM user_data WHERE username = ?'
+    ).bind(username).all();
+
+    const result = {};
+    // Set defaults for all stores
+    for (const s of VALID_STORES) {
+      result[s] = getDefaultForStore(s);
+    }
+    // Override with actual data
+    if (rows && rows.results) {
+      for (const row of rows.results) {
+        result[row.store_name] = JSON.parse(row.data);
+      }
+    }
+
+    return Response.json({ success: true, data: result }, { headers: CORS_HEADERS });
+
+  } catch (err) {
+    console.error('D1 read error:', err);
+    return Response.json({ error: 'Database read failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
+  }
+}
+
+// POST /api/data  — Write data for a user+store
+// Body: { username, store, data }
+export async function onRequestPost(context) {
+  const { env, request } = context;
+
+  const DB = env.DB;
+  if (!DB) {
+    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  const { username, store, data } = body;
+
+  if (!username || !store) {
+    return Response.json({ error: 'Missing username or store' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  if (!VALID_STORES.includes(store)) {
+    return Response.json({ error: `Invalid store: ${store}` }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  try {
+    const jsonData = JSON.stringify(data);
+
+    await DB.prepare(
+      `INSERT INTO user_data (username, store_name, data, updated_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(username, store_name)
+       DO UPDATE SET data = excluded.data, updated_at = datetime('now')`
+    ).bind(username, store, jsonData).run();
+
+    return Response.json({ success: true }, { headers: CORS_HEADERS });
+
+  } catch (err) {
+    console.error('D1 write error:', err);
+    return Response.json({ error: 'Database write failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
+  }
+}
+
+// PUT /api/data  — Bulk import all stores for a user
+// Body: { username, stores: { accounts: [...], quotes: [...], ... } }
+export async function onRequestPut(context) {
+  const { env, request } = context;
+
+  const DB = env.DB;
+  if (!DB) {
+    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  const { username, stores } = body;
+
+  if (!username || !stores) {
+    return Response.json({ error: 'Missing username or stores' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  try {
+    // Use a batch operation for efficiency
+    const statements = [];
+    for (const [storeName, data] of Object.entries(stores)) {
+      if (VALID_STORES.includes(storeName)) {
+        statements.push(
+          DB.prepare(
+            `INSERT INTO user_data (username, store_name, data, updated_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(username, store_name)
+             DO UPDATE SET data = excluded.data, updated_at = datetime('now')`
+          ).bind(username, storeName, JSON.stringify(data))
+        );
+      }
+    }
+
+    if (statements.length > 0) {
+      await DB.batch(statements);
+    }
+
+    return Response.json({ success: true, storesWritten: statements.length }, { headers: CORS_HEADERS });
+
+  } catch (err) {
+    console.error('D1 bulk write error:', err);
+    return Response.json({ error: 'Bulk write failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
+  }
+}
+
+// DELETE /api/data?username=xxx&store=yyy  — Delete a specific store for a user
+export async function onRequestDelete(context) {
+  const { env } = context;
+  const url = new URL(context.request.url);
+  const username = url.searchParams.get('username');
+  const store = url.searchParams.get('store');
+
+  if (!username) {
+    return Response.json({ error: 'Missing username' }, { status: 400, headers: CORS_HEADERS });
+  }
+
+  const DB = env.DB;
+  if (!DB) {
+    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
+  }
+
+  try {
+    if (store) {
+      await DB.prepare(
+        'DELETE FROM user_data WHERE username = ? AND store_name = ?'
+      ).bind(username, store).run();
+    } else {
+      await DB.prepare(
+        'DELETE FROM user_data WHERE username = ?'
+      ).bind(username).run();
+    }
+
+    return Response.json({ success: true }, { headers: CORS_HEADERS });
+
+  } catch (err) {
+    console.error('D1 delete error:', err);
+    return Response.json({ error: 'Delete failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
+  }
+}
+
+function getDefaultForStore(storeName) {
+  if (storeName === 'credits') return 1000;
+  if (storeName === 'drafts') return null;
+  if (storeName === 'parts_image_pool') return {};
+  return [];
+}

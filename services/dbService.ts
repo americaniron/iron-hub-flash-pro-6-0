@@ -2,47 +2,121 @@
 import { CustomerAccount, SavedQuote, InvoiceData, Payment, RecurringInvoice, InvoiceTemplate, InventoryPart } from '../types.ts';
 
 /**
- * Enterprise Cloud Repository Service
- * Uses IndexedDB for persistent client-side storage to prevent data loss on redeployment.
- * This provides a robust, offline-capable data store.
+ * Enterprise Cloud Repository Service — V2 (Server-Backed)
+ *
+ * PRIMARY: Cloudflare D1 database via /api/data endpoints (permanent, cross-device)
+ * FALLBACK: IndexedDB for offline/iframe scenarios where server is unreachable
+ *
+ * On every read: tries server first, falls back to IndexedDB cache
+ * On every write: writes to server first, then mirrors to IndexedDB cache
+ * On startup: checks server availability and migrates any local-only data up
  */
 
-const DELAY = 200; // Simulated Cloud Latency (reduced for faster local DB access)
+const API_BASE = '/api/data';
+const API_STATUS = '/api/data-status';
+const DELAY = 0; // No artificial delay needed — server latency is real
 const DB_NAME = 'AmericanIronHubDB_V1';
 const DB_VERSION = 2;
 const STORE_NAMES = ['accounts', 'quotes', 'invoices', 'payments', 'credits', 'drafts', 'recurring_invoices', 'templates', 'parts_image_pool', 'inventory'];
 
-let dbPromise: Promise<IDBDatabase> | null = null;
+// ---- Server availability state ----
+let serverAvailable: boolean | null = null; // null = not checked yet
+let lastServerCheck = 0;
+const SERVER_CHECK_INTERVAL = 30000; // Re-check every 30s if server was down
 
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+async function checkServerAvailability(): Promise<boolean> {
+  const now = Date.now();
+  if (serverAvailable !== null && (now - lastServerCheck) < SERVER_CHECK_INTERVAL) {
+    return serverAvailable;
+  }
+
+  try {
+    const res = await fetch(API_STATUS, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const json = await res.json();
+      serverAvailable = json.serverStorage === true;
+    } else {
+      serverAvailable = false;
+    }
+  } catch {
+    serverAvailable = false;
+  }
+  lastServerCheck = now;
+  return serverAvailable;
+}
+
+// ---- Server API helpers ----
+async function serverGet<T>(username: string, store: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.success ? json.data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function serverSet(username: string, store: string, data: any): Promise<boolean> {
+  try {
+    const res = await fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, store, data }),
+      signal: AbortSignal.timeout(8000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function serverGetAll(username: string): Promise<Record<string, any> | null> {
+  try {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.success ? json.data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function serverSetAll(username: string, stores: Record<string, any>): Promise<boolean> {
+  try {
+    const res = await fetch(API_BASE, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, stores }),
+      signal: AbortSignal.timeout(15000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---- IndexedDB (local cache / fallback) ----
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 function getDb(): Promise<IDBDatabase> {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       if (!('indexedDB' in window)) {
-        reject('IndexedDB not supported in this browser.');
+        reject('IndexedDB not supported');
         return;
       }
-
       const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-      request.onerror = () => {
-        console.error("IndexedDB error:", request.error);
-        reject("IndexedDB error");
-      };
-
+      request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const db = request.result;
-        // IMPROVEMENT: Handle unexpected connection closes. When the connection is closed by the browser
-        // or other circumstances, we reset the dbPromise. This forces a fresh connection
-        // on the next call, preventing "connection is closing" errors and making the service self-healing.
-        db.onclose = () => {
-            console.warn("Database connection closed unexpectedly. It will be reopened on the next request.");
-            dbPromise = null;
-        };
+        db.onclose = () => { dbPromise = null; };
         resolve(db);
       };
-
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
         STORE_NAMES.forEach(storeName => {
@@ -56,50 +130,161 @@ function getDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-async function getStoreData<T>(storeName: string, username: string): Promise<T | null> {
-  const db = await getDb();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, 'readonly');
-    const store = transaction.objectStore(storeName);
-    const request = store.get(username);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result ? request.result.data : null);
-  });
+async function localGet<T>(storeName: string, username: string): Promise<T | null> {
+  try {
+    const db = await getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.get(username);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve(req.result ? req.result.data : null);
+    });
+  } catch {
+    return null;
+  }
 }
 
-async function setStoreData<T>(storeName: string, username: string, data: T): Promise<void> {
-  const db = await getDb();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, 'readwrite');
-    const store = transaction.objectStore(storeName);
-    const request = store.put({ username, data });
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve();
-  });
+async function localSet<T>(storeName: string, username: string, data: T): Promise<void> {
+  try {
+    const db = await getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const req = store.put({ username, data });
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve();
+    });
+  } catch {
+    // Silent fail on local cache write
+  }
 }
+
+// ---- Unified read/write: server-first, local-fallback ----
+async function getData<T>(storeName: string, username: string, defaultVal: T): Promise<T> {
+  const isUp = await checkServerAvailability();
+
+  if (isUp) {
+    const serverData = await serverGet<T>(username, storeName);
+    if (serverData !== null) {
+      // Cache locally for offline access
+      localSet(storeName, username, serverData).catch(() => {});
+      return serverData;
+    }
+  }
+
+  // Fallback: try local IndexedDB
+  const localData = await localGet<T>(storeName, username);
+  if (localData !== null) {
+    // If server is up but returned null (empty), push local data to server (migration)
+    if (isUp) {
+      serverSet(username, storeName, localData).catch(() => {});
+    }
+    return localData;
+  }
+
+  return defaultVal;
+}
+
+async function setData<T>(storeName: string, username: string, data: T): Promise<void> {
+  const isUp = await checkServerAvailability();
+
+  if (isUp) {
+    const ok = await serverSet(username, storeName, data);
+    if (ok) {
+      // Also cache locally
+      localSet(storeName, username, data).catch(() => {});
+      return;
+    }
+  }
+
+  // Fallback: write to local IndexedDB
+  await localSet(storeName, username, data);
+}
+
+// ---- Migration: push local IndexedDB data to server on first connect ----
+let migrationDone = new Set<string>();
+
+async function migrateLocalToServer(username: string): Promise<void> {
+  if (migrationDone.has(username)) return;
+
+  const isUp = await checkServerAvailability();
+  if (!isUp) return;
+
+  try {
+    // Check if server already has data for this user
+    const serverData = await serverGetAll(username);
+    const hasServerData = serverData && Object.values(serverData).some(v => {
+      if (Array.isArray(v) && v.length > 0) return true;
+      if (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length > 0) return true;
+      return false;
+    });
+
+    if (hasServerData) {
+      // Server already has data — no need to migrate, server is source of truth
+      migrationDone.add(username);
+      return;
+    }
+
+    // Server is empty — check if we have local data to push up
+    const localStores: Record<string, any> = {};
+    let hasLocal = false;
+
+    for (const store of STORE_NAMES) {
+      const data = await localGet(store, username);
+      if (data !== null) {
+        const isNonEmpty = Array.isArray(data) ? data.length > 0 :
+          typeof data === 'object' && data !== null ? Object.keys(data).length > 0 :
+          data !== null;
+        if (isNonEmpty) {
+          localStores[store] = data;
+          hasLocal = true;
+        }
+      }
+    }
+
+    if (hasLocal) {
+      console.log(`[dbService] Migrating ${Object.keys(localStores).length} local stores to cloud for ${username}`);
+      await serverSetAll(username, localStores);
+    }
+
+    migrationDone.add(username);
+  } catch (err) {
+    console.warn('[dbService] Migration failed:', err);
+  }
+}
+
+
+// ========================================================
+// PUBLIC API — same interface as before, now server-backed
+// ========================================================
 
 export const dbService = {
+  // ---- Initialization: call this after login ----
+  async initialize(username: string): Promise<{ serverConnected: boolean }> {
+    const isUp = await checkServerAvailability();
+    if (isUp) {
+      // Kick off migration in background
+      migrateLocalToServer(username).catch(() => {});
+    }
+    return { serverConnected: isUp };
+  },
+
   // --- Customer Account Operations ---
   async getCustomerAccounts(username: string): Promise<CustomerAccount[]> {
-    await wait(DELAY);
-    const data = await getStoreData<CustomerAccount[]>("accounts", username);
-    return data || [];
+    return getData<CustomerAccount[]>('accounts', username, []);
   },
 
   async saveCustomerAccounts(username: string, accounts: CustomerAccount[]): Promise<void> {
-    await wait(DELAY / 2);
-    await setStoreData("accounts", username, accounts);
+    await setData('accounts', username, accounts);
   },
 
   // --- Quote Archive Operations ---
   async getQuotes(username: string): Promise<SavedQuote[]> {
-    await wait(DELAY);
-    const data = await getStoreData<SavedQuote[]>("quotes", username);
-    return data || [];
+    return getData<SavedQuote[]>('quotes', username, []);
   },
 
   async saveQuote(username: string, quote: Omit<SavedQuote, 'id' | 'timestamp' | 'author'>): Promise<SavedQuote> {
-    await wait(DELAY);
     const quotes = await this.getQuotes(username);
     const newQuote: SavedQuote = {
       ...quote,
@@ -107,105 +292,93 @@ export const dbService = {
       timestamp: new Date().toISOString(),
       author: username
     };
-    quotes.unshift(newQuote); // Newest first
-    await setStoreData("quotes", username, quotes.slice(0, 100)); // Limit history
+    quotes.unshift(newQuote);
+    await setData('quotes', username, quotes.slice(0, 100));
     return newQuote;
   },
 
   async saveAllQuotes(username: string, quotes: SavedQuote[]): Promise<void> {
-    await wait(DELAY / 2);
-    await setStoreData("quotes", username, quotes);
+    await setData('quotes', username, quotes);
   },
 
   async deleteQuote(username: string, quoteId: string): Promise<void> {
-    await wait(DELAY);
     const quotes = await this.getQuotes(username);
     const filtered = quotes.filter(q => q.id !== quoteId);
-    await setStoreData("quotes", username, filtered);
+    await setData('quotes', username, filtered);
   },
 
-  // --- New Invoice & Payment Operations ---
+  // --- Invoice & Payment Operations ---
   async getInvoices(username: string): Promise<InvoiceData[]> {
-    await wait(DELAY);
-    const data = await getStoreData<InvoiceData[]>("invoices", username);
-    return data || [];
+    return getData<InvoiceData[]>('invoices', username, []);
   },
 
   async saveInvoices(username: string, invoices: InvoiceData[]): Promise<void> {
-    await wait(DELAY);
-    await setStoreData("invoices", username, invoices);
+    await setData('invoices', username, invoices);
   },
 
   async getPayments(username: string): Promise<Payment[]> {
-    await wait(DELAY);
-    const data = await getStoreData<Payment[]>("payments", username);
-    return data || [];
+    return getData<Payment[]>('payments', username, []);
   },
-  
+
   async savePayments(username: string, payments: Payment[]): Promise<void> {
-    await wait(DELAY);
-    await setStoreData("payments", username, payments);
+    await setData('payments', username, payments);
   },
 
   // --- Recurring Invoices ---
   async getRecurringInvoices(username: string): Promise<RecurringInvoice[]> {
-    await wait(DELAY);
-    const data = await getStoreData<RecurringInvoice[]>("recurring_invoices", username);
-    return data || [];
+    return getData<RecurringInvoice[]>('recurring_invoices', username, []);
   },
 
   async saveRecurringInvoices(username: string, recurring: RecurringInvoice[]): Promise<void> {
-    await wait(DELAY);
-    await setStoreData("recurring_invoices", username, recurring);
+    await setData('recurring_invoices', username, recurring);
   },
 
   // --- Invoice Templates ---
   async getTemplates(username: string): Promise<InvoiceTemplate[]> {
-    await wait(DELAY);
-    const data = await getStoreData<InvoiceTemplate[]>("templates", username);
-    return data || [];
+    return getData<InvoiceTemplate[]>('templates', username, []);
   },
 
   async saveTemplates(username: string, templates: InvoiceTemplate[]): Promise<void> {
-    await wait(DELAY);
-    await setStoreData("templates", username, templates);
+    await setData('templates', username, templates);
   },
 
   // --- Draft Persistence ---
   async getDraft(username: string): Promise<any | null> {
-    await wait(DELAY);
-    return await getStoreData<any>("drafts", username);
+    return getData<any>('drafts', username, null);
   },
 
   async saveDraft(username: string, data: any): Promise<void> {
-    await wait(DELAY / 4);
-    await setStoreData("drafts", username, data);
+    await setData('drafts', username, data);
   },
 
   // --- Billing & Resource Control ---
   async getUserCredits(username: string): Promise<number> {
-    await wait(DELAY / 2);
-    const credits = await getStoreData<number>("credits", username);
-    // Return credits if it's a number (including 0), otherwise default.
-    return typeof credits === 'number' ? credits : 1000;
+    return getData<number>('credits', username, 1000);
   },
 
   async deductCredits(username: string, amount: number): Promise<number> {
     const current = await this.getUserCredits(username);
     const updated = Math.max(0, current - amount);
-    await setStoreData("credits", username, updated);
+    await setData('credits', username, updated);
     return updated;
   },
 
   // --- Data Portability ---
   async exportAllUserData(username: string): Promise<Record<string, any>> {
+    const isUp = await checkServerAvailability();
+
+    if (isUp) {
+      const serverData = await serverGetAll(username);
+      if (serverData) return serverData;
+    }
+
+    // Fallback to local
     const exportedData: Record<string, any> = {};
     for (const storeName of STORE_NAMES) {
-      const data = await getStoreData(storeName, username);
+      const data = await localGet(storeName, username);
       if (data !== null) {
         exportedData[storeName] = data;
       } else {
-        // Provide sensible defaults for missing data
         if (storeName === 'credits') exportedData[storeName] = 1000;
         else if (storeName === 'drafts') exportedData[storeName] = null;
         else if (storeName === 'parts_image_pool') exportedData[storeName] = {};
@@ -216,15 +389,30 @@ export const dbService = {
   },
 
   async importAllUserData(username: string, data: Record<string, any>): Promise<void> {
+    const isUp = await checkServerAvailability();
+
+    if (isUp) {
+      const ok = await serverSetAll(username, data);
+      if (ok) {
+        // Also cache locally
+        for (const [store, storeData] of Object.entries(data)) {
+          if (STORE_NAMES.includes(store)) {
+            localSet(store, username, storeData).catch(() => {});
+          }
+        }
+        return;
+      }
+    }
+
+    // Fallback: import to local IndexedDB
     const db = await getDb();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction(STORE_NAMES, 'readwrite');
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-
+      const tx = db.transaction(STORE_NAMES, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
       STORE_NAMES.forEach(storeName => {
         if (data.hasOwnProperty(storeName)) {
-          const store = transaction.objectStore(storeName);
+          const store = tx.objectStore(storeName);
           store.put({ username, data: data[storeName] });
         }
       });
@@ -233,51 +421,43 @@ export const dbService = {
 
   // --- Inventory Operations ---
   async getInventory(username: string): Promise<InventoryPart[]> {
-    await wait(DELAY);
-    const data = await getStoreData<InventoryPart[]>("inventory", username);
-    return data || [];
+    return getData<InventoryPart[]>('inventory', username, []);
   },
 
   async saveInventory(username: string, inventory: InventoryPart[]): Promise<void> {
-    await wait(DELAY / 2);
-    await setStoreData("inventory", username, inventory);
+    await setData('inventory', username, inventory);
   },
 
   async addOrUpdateInventoryParts(username: string, newParts: InventoryPart[]): Promise<void> {
     const currentInventory = await this.getInventory(username);
     const inventoryMap = new Map(currentInventory.map(p => [p.partNo, p]));
-    
+
     for (const part of newParts) {
       if (inventoryMap.has(part.partNo)) {
         const existing = inventoryMap.get(part.partNo)!;
-        // Update image if new one exists and old one doesn't
         if (part.imageUrl && !existing.imageUrl) {
           existing.imageUrl = part.imageUrl;
         }
         if (part.originalImages && part.originalImages.length > 0) {
           existing.originalImages = part.originalImages;
         }
-        // Update price if it changed
         existing.originalPrice = part.originalPrice;
         existing.description = part.description;
       } else {
         inventoryMap.set(part.partNo, part);
       }
     }
-    
+
     await this.saveInventory(username, Array.from(inventoryMap.values()));
   },
 
   // --- Parts Image Pool Operations ---
   async getPartsImagePool(username: string): Promise<Record<string, string>> {
-    await wait(DELAY);
-    const data = await getStoreData<Record<string, string>>("parts_image_pool", username);
-    return data || {};
+    return getData<Record<string, string>>('parts_image_pool', username, {});
   },
 
   async savePartsImagePool(username: string, pool: Record<string, string>): Promise<void> {
-    await wait(DELAY / 2);
-    await setStoreData("parts_image_pool", username, pool);
+    await setData('parts_image_pool', username, pool);
   },
 
   async addImageToPool(username: string, partNo: string, description: string, imageUrl: string): Promise<void> {

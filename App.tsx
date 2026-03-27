@@ -10,6 +10,7 @@ import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, Sav
 import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
+import { Login } from './components/Login.tsx';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -25,23 +26,37 @@ const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
   </div>
 );
 
-const usePersistentUser = (): User | null => {
+// Persistent login: remembers the logged-in user across sessions via localStorage
+const useAuthenticatedUser = (): {
+  user: User | null;
+  login: (user: User) => void;
+  logout: () => void;
+} => {
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    let userId = localStorage.getItem('ai_user_id');
-    if (!userId) {
-      userId = `user-${crypto.randomUUID()}`;
-      localStorage.setItem('ai_user_id', userId);
+    // Restore session from localStorage
+    const saved = localStorage.getItem('iron_hub_user');
+    if (saved) {
+      try {
+        setUser(JSON.parse(saved));
+      } catch {
+        localStorage.removeItem('iron_hub_user');
+      }
     }
-    setUser({
-      username: userId,
-      displayName: 'Local User',
-      role: 'Engineer'
-    });
   }, []);
 
-  return user;
+  const login = (u: User) => {
+    localStorage.setItem('iron_hub_user', JSON.stringify(u));
+    setUser(u);
+  };
+
+  const logout = () => {
+    localStorage.removeItem('iron_hub_user');
+    setUser(null);
+  };
+
+  return { user, login, logout };
 };
 
 const generateDocumentId = (isInvoice: boolean) => {
@@ -101,7 +116,7 @@ const InventorySystem = React.lazy(() => import('./components/InventorySystem.ts
 const Dashboard = React.lazy(() => import('./components/Dashboard.tsx').then(module => ({ default: module.Dashboard })));
 
 const App: React.FC = () => {
-  const user = usePersistentUser();
+  const { user, login, logout } = useAuthenticatedUser();
   const [activeSystem, setActiveSystem] = useState<'quoting' | 'invoicing' | 'accounts' | 'inventory' | 'dashboard'>('quoting');
   const [initialInvoiceData, setInitialInvoiceData] = useState<InvoiceData | null>(null);
   const [invoiceToSend, setInvoiceToSend] = useState<InvoiceData | null>(null);
@@ -179,6 +194,10 @@ const App: React.FC = () => {
     const syncCloudData = async () => {
       setSyncStatus('syncing');
       try {
+        // Initialize server connection & migrate local data if needed
+        const { serverConnected } = await dbService.initialize(user.username);
+        console.log(`[App] Data layer: ${serverConnected ? 'Cloud D1 (permanent)' : 'Local IndexedDB (fallback)'}`);
+
         const [accounts, quotes, invoicesData, paymentsData, recurringData, templatesData, inventoryData] = await Promise.all([
           dbService.getCustomerAccounts(user.username),
           dbService.getQuotes(user.username),
@@ -484,8 +503,7 @@ const App: React.FC = () => {
   };
   
   const handleLogout = () => {
-    localStorage.removeItem('ai_user_id');
-    window.location.reload();
+    logout();
   };
 
   const handleSaveInvoices = async (newInvoices: InvoiceData[]) => {
@@ -878,7 +896,7 @@ const App: React.FC = () => {
   };
 
   if (!user) {
-    return <LoadingScreen message="Initializing Session..." />;
+    return <Login onLogin={login} />;
   }
 
   const generatePdf = async () => {
