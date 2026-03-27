@@ -873,13 +873,14 @@ const App: React.FC = () => {
             setSyncStatus('syncing');
             await dbService.importAllUserData(user.username, importedData);
             
-            // Update local state immediately so the user sees the changes without needing a full reload
+            // Update ALL local state immediately so the user sees the changes without needing a full reload
             if (importedData.accounts) setCustomerAccounts(importedData.accounts);
             if (importedData.quotes) setQuoteHistory(importedData.quotes);
             if (importedData.invoices) setInvoices(importedData.invoices);
             if (importedData.payments) setPayments(importedData.payments);
             if (importedData.recurring_invoices) setRecurringInvoices(importedData.recurring_invoices);
             if (importedData.templates) setTemplates(importedData.templates);
+            if (importedData.inventory) setInventory(importedData.inventory);
             
             setSyncStatus('stable');
             alert("Import successful!");
