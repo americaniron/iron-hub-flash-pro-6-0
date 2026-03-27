@@ -163,6 +163,29 @@ async function localSet<T>(storeName: string, username: string, data: T): Promis
 // ---- Helpers to detect default/empty values ----
 const D1_MAX_STORE_SIZE = 900_000; // ~900KB safe limit for D1 row values
 
+// Estimate JSON size WITHOUT full serialization (avoids OOM on 100MB+ stores)
+function estimateSize(data: any): number {
+  if (data === null || data === undefined) return 4;
+  if (typeof data === 'number' || typeof data === 'boolean') return 8;
+  if (typeof data === 'string') return data.length + 2;
+  if (Array.isArray(data)) {
+    if (data.length === 0) return 2;
+    // Serialize ONLY the first item and extrapolate
+    const sampleSize = JSON.stringify(data[0]).length;
+    return (sampleSize + 1) * data.length + 2;
+  }
+  if (typeof data === 'object') {
+    const keys = Object.keys(data);
+    if (keys.length === 0) return 2;
+    // Sample first 3 values and extrapolate
+    const sampleKeys = keys.slice(0, Math.min(3, keys.length));
+    let totalSample = 0;
+    for (const k of sampleKeys) totalSample += JSON.stringify(data[k]).length + k.length + 4;
+    return Math.ceil((totalSample / sampleKeys.length) * keys.length);
+  }
+  return 100;
+}
+
 function isEmptyDefault(storeName: string, data: any): boolean {
   if (data === null || data === undefined) return true;
   if (storeName === 'credits' && data === 1000) return true;
@@ -184,8 +207,8 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
         const localData = await localGet<T>(storeName, username);
         if (localData !== null && !isEmptyDefault(storeName, localData)) {
           // Local has real data that server doesn't — use local and try to push to server
-          const jsonSize = JSON.stringify(localData).length;
-          if (jsonSize < D1_MAX_STORE_SIZE) {
+          const estSize = estimateSize(localData);
+          if (estSize < D1_MAX_STORE_SIZE) {
             serverSet(username, storeName, localData).catch(() => {});
           }
           return localData;
@@ -202,8 +225,8 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   if (localData !== null) {
     // If server is up but returned null (error), push local data to server (migration)
     if (isUp) {
-      const jsonSize = JSON.stringify(localData).length;
-      if (jsonSize < D1_MAX_STORE_SIZE) {
+      const estSize = estimateSize(localData);
+      if (estSize < D1_MAX_STORE_SIZE) {
         serverSet(username, storeName, localData).catch(() => {});
       }
     }
@@ -215,9 +238,9 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
 
 async function setData<T>(storeName: string, username: string, data: T): Promise<void> {
   const isUp = await checkServerAvailability();
-  const jsonSize = JSON.stringify(data).length;
+  const estSize = estimateSize(data);
 
-  if (isUp && jsonSize < D1_MAX_STORE_SIZE) {
+  if (isUp && estSize < D1_MAX_STORE_SIZE) {
     const ok = await serverSet(username, storeName, data);
     if (ok) {
       // Also cache locally
@@ -228,8 +251,8 @@ async function setData<T>(storeName: string, username: string, data: T): Promise
 
   // Fallback or large data: write to local IndexedDB
   await localSet(storeName, username, data);
-  if (jsonSize >= D1_MAX_STORE_SIZE) {
-    console.log(`[dbService] Store '${storeName}' is ${(jsonSize / 1024 / 1024).toFixed(1)}MB — saved to local storage (exceeds D1 limit)`);
+  if (estSize >= D1_MAX_STORE_SIZE) {
+    console.log(`[dbService] Store '${storeName}' is ~${(estSize / 1024 / 1024).toFixed(1)}MB — saved to local storage (exceeds D1 limit)`);
   }
 }
 
@@ -278,11 +301,11 @@ async function migrateLocalToServer(username: string): Promise<void> {
       // Migrate store-by-store, skipping stores that are too large for D1
       const smallStores: Record<string, any> = {};
       for (const [store, storeData] of Object.entries(localStores)) {
-        const jsonSize = JSON.stringify(storeData).length;
-        if (jsonSize < D1_MAX_STORE_SIZE) {
+        const estSize = estimateSize(storeData);
+        if (estSize < D1_MAX_STORE_SIZE) {
           smallStores[store] = storeData;
         } else {
-          console.log(`[dbService] Skipping migration of '${store}' (${(jsonSize / 1024 / 1024).toFixed(1)}MB) — exceeds D1 limit`);
+          console.log(`[dbService] Skipping migration of '${store}' (~${(estSize / 1024 / 1024).toFixed(1)}MB) — exceeds D1 limit`);
         }
       }
       if (Object.keys(smallStores).length > 0) {
@@ -447,16 +470,16 @@ export const dbService = {
       if (!STORE_NAMES.includes(store)) continue;
 
       let serverWritten = false;
-      const jsonSize = JSON.stringify(storeData).length;
+      const estSize = estimateSize(storeData);
 
-      if (isUp && jsonSize < D1_MAX_STORE_SIZE) {
+      if (isUp && estSize < D1_MAX_STORE_SIZE) {
         // Small enough for D1 — write to server
         serverWritten = await serverSet(username, store, storeData);
         if (serverWritten) {
-          console.log(`[import] ${store}: saved to cloud (${(jsonSize / 1024).toFixed(0)}KB)`);
+          console.log(`[import] ${store}: saved to cloud (~${(estSize / 1024).toFixed(0)}KB)`);
         }
-      } else if (jsonSize >= D1_MAX_STORE_SIZE) {
-        console.log(`[import] ${store}: ${(jsonSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally`);
+      } else if (estSize >= D1_MAX_STORE_SIZE) {
+        console.log(`[import] ${store}: ~${(estSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally`);
       }
 
       // Always write to IndexedDB (critical for large stores, and as cache for small ones)
