@@ -160,6 +160,18 @@ async function localSet<T>(storeName: string, username: string, data: T): Promis
   }
 }
 
+// ---- Helpers to detect default/empty values ----
+const D1_MAX_STORE_SIZE = 900_000; // ~900KB safe limit for D1 row values
+
+function isEmptyDefault(storeName: string, data: any): boolean {
+  if (data === null || data === undefined) return true;
+  if (storeName === 'credits' && data === 1000) return true;
+  if (storeName === 'drafts' && data === null) return true;
+  if (Array.isArray(data) && data.length === 0) return true;
+  if (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0) return true;
+  return false;
+}
+
 // ---- Unified read/write: server-first, local-fallback ----
 async function getData<T>(storeName: string, username: string, defaultVal: T): Promise<T> {
   const isUp = await checkServerAvailability();
@@ -167,7 +179,19 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   if (isUp) {
     const serverData = await serverGet<T>(username, storeName);
     if (serverData !== null) {
-      // Cache locally for offline access
+      // If server returned empty/default, check if local has real data first
+      if (isEmptyDefault(storeName, serverData)) {
+        const localData = await localGet<T>(storeName, username);
+        if (localData !== null && !isEmptyDefault(storeName, localData)) {
+          // Local has real data that server doesn't — use local and try to push to server
+          const jsonSize = JSON.stringify(localData).length;
+          if (jsonSize < D1_MAX_STORE_SIZE) {
+            serverSet(username, storeName, localData).catch(() => {});
+          }
+          return localData;
+        }
+      }
+      // Server has real data — cache locally
       localSet(storeName, username, serverData).catch(() => {});
       return serverData;
     }
@@ -176,9 +200,12 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   // Fallback: try local IndexedDB
   const localData = await localGet<T>(storeName, username);
   if (localData !== null) {
-    // If server is up but returned null (empty), push local data to server (migration)
+    // If server is up but returned null (error), push local data to server (migration)
     if (isUp) {
-      serverSet(username, storeName, localData).catch(() => {});
+      const jsonSize = JSON.stringify(localData).length;
+      if (jsonSize < D1_MAX_STORE_SIZE) {
+        serverSet(username, storeName, localData).catch(() => {});
+      }
     }
     return localData;
   }
@@ -188,8 +215,9 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
 
 async function setData<T>(storeName: string, username: string, data: T): Promise<void> {
   const isUp = await checkServerAvailability();
+  const jsonSize = JSON.stringify(data).length;
 
-  if (isUp) {
+  if (isUp && jsonSize < D1_MAX_STORE_SIZE) {
     const ok = await serverSet(username, storeName, data);
     if (ok) {
       // Also cache locally
@@ -198,8 +226,11 @@ async function setData<T>(storeName: string, username: string, data: T): Promise
     }
   }
 
-  // Fallback: write to local IndexedDB
+  // Fallback or large data: write to local IndexedDB
   await localSet(storeName, username, data);
+  if (jsonSize >= D1_MAX_STORE_SIZE) {
+    console.log(`[dbService] Store '${storeName}' is ${(jsonSize / 1024 / 1024).toFixed(1)}MB — saved to local storage (exceeds D1 limit)`);
+  }
 }
 
 // ---- Migration: push local IndexedDB data to server on first connect ----
@@ -244,8 +275,20 @@ async function migrateLocalToServer(username: string): Promise<void> {
     }
 
     if (hasLocal) {
-      console.log(`[dbService] Migrating ${Object.keys(localStores).length} local stores to cloud for ${username}`);
-      await serverSetAll(username, localStores);
+      // Migrate store-by-store, skipping stores that are too large for D1
+      const smallStores: Record<string, any> = {};
+      for (const [store, storeData] of Object.entries(localStores)) {
+        const jsonSize = JSON.stringify(storeData).length;
+        if (jsonSize < D1_MAX_STORE_SIZE) {
+          smallStores[store] = storeData;
+        } else {
+          console.log(`[dbService] Skipping migration of '${store}' (${(jsonSize / 1024 / 1024).toFixed(1)}MB) — exceeds D1 limit`);
+        }
+      }
+      if (Object.keys(smallStores).length > 0) {
+        console.log(`[dbService] Migrating ${Object.keys(smallStores).length} local stores to cloud for ${username}`);
+        await serverSetAll(username, smallStores);
+      }
     }
 
     migrationDone.add(username);
@@ -366,19 +409,27 @@ export const dbService = {
   // --- Data Portability ---
   async exportAllUserData(username: string): Promise<Record<string, any>> {
     const isUp = await checkServerAvailability();
+    const exportedData: Record<string, any> = {};
 
+    // Merge server + local to get complete picture (large stores live locally only)
+    let serverData: Record<string, any> | null = null;
     if (isUp) {
-      const serverData = await serverGetAll(username);
-      if (serverData) return serverData;
+      serverData = await serverGetAll(username);
     }
 
-    // Fallback to local
-    const exportedData: Record<string, any> = {};
     for (const storeName of STORE_NAMES) {
-      const data = await localGet(storeName, username);
-      if (data !== null) {
-        exportedData[storeName] = data;
+      // Check server first
+      const sData = serverData ? serverData[storeName] : null;
+      // Check local
+      const lData = await localGet(storeName, username);
+
+      // Use whichever has real (non-empty) data; prefer local for large stores
+      if (lData !== null && !isEmptyDefault(storeName, lData)) {
+        exportedData[storeName] = lData;
+      } else if (sData !== null && !isEmptyDefault(storeName, sData)) {
+        exportedData[storeName] = sData;
       } else {
+        // Both empty — use default
         if (storeName === 'credits') exportedData[storeName] = 1000;
         else if (storeName === 'drafts') exportedData[storeName] = null;
         else if (storeName === 'parts_image_pool') exportedData[storeName] = {};
@@ -391,32 +442,31 @@ export const dbService = {
   async importAllUserData(username: string, data: Record<string, any>): Promise<void> {
     const isUp = await checkServerAvailability();
 
-    if (isUp) {
-      const ok = await serverSetAll(username, data);
-      if (ok) {
-        // Also cache locally
-        for (const [store, storeData] of Object.entries(data)) {
-          if (STORE_NAMES.includes(store)) {
-            localSet(store, username, storeData).catch(() => {});
-          }
+    // Import store-by-store to handle large stores gracefully
+    for (const [store, storeData] of Object.entries(data)) {
+      if (!STORE_NAMES.includes(store)) continue;
+
+      let serverWritten = false;
+      const jsonSize = JSON.stringify(storeData).length;
+
+      if (isUp && jsonSize < D1_MAX_STORE_SIZE) {
+        // Small enough for D1 — write to server
+        serverWritten = await serverSet(username, store, storeData);
+        if (serverWritten) {
+          console.log(`[import] ${store}: saved to cloud (${(jsonSize / 1024).toFixed(0)}KB)`);
         }
-        return;
+      } else if (jsonSize >= D1_MAX_STORE_SIZE) {
+        console.log(`[import] ${store}: ${(jsonSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally`);
+      }
+
+      // Always write to IndexedDB (critical for large stores, and as cache for small ones)
+      try {
+        await localSet(store, username, storeData);
+        console.log(`[import] ${store}: saved to local storage`);
+      } catch (err) {
+        console.error(`[import] ${store}: local save failed`, err);
       }
     }
-
-    // Fallback: import to local IndexedDB
-    const db = await getDb();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAMES, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      STORE_NAMES.forEach(storeName => {
-        if (data.hasOwnProperty(storeName)) {
-          const store = tx.objectStore(storeName);
-          store.put({ username, data: data[storeName] });
-        }
-      });
-    });
   },
 
   // --- Inventory Operations ---
