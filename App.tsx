@@ -457,48 +457,31 @@ const App: React.FC = () => {
   // ---- WhatsApp Share Handlers ----
   const handleWhatsAppQuote = async () => {
     try {
+      // Generate and auto-download the PDF
       const pdfBase64 = await generatePdf();
       if (!pdfBase64) { alert('Failed to generate PDF.'); return; }
 
-      // Convert data URI to Blob
       const byteString = atob(pdfBase64.split(',')[1]);
-      const mimeType = 'application/pdf';
       const ab = new ArrayBuffer(byteString.length);
       const ia = new Uint8Array(ab);
       for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
-      const pdfBlob = new Blob([ab], { type: mimeType });
-      const pdfFile = new File([pdfBlob], `${config.quoteId || 'Quote'}.pdf`, { type: mimeType });
+      const pdfBlob = new Blob([ab], { type: 'application/pdf' });
 
-      // Build WhatsApp phone number from client info
-      const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
-
-      // Detect mobile (only use Web Share API on mobile where WhatsApp is a share target)
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-      if (isMobile && navigator.share && navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
-        await navigator.share({
-          title: `Quote ${config.quoteId}`,
-          text: `Quote from American Iron — ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}`,
-          files: [pdfFile],
-        });
-        return;
-      }
-
-      // Desktop: download PDF + open WhatsApp web/app with text
-      const url = URL.createObjectURL(pdfBlob);
+      const dlUrl = URL.createObjectURL(pdfBlob);
       const a = document.createElement('a');
-      a.href = url; a.download = pdfFile.name;
+      a.href = dlUrl; a.download = `${config.quoteId || 'Quote'}.pdf`;
       document.body.appendChild(a); a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(dlUrl);
 
+      // Open WhatsApp API send page — prompts "Open WhatsApp?" dialog
+      const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
       const text = encodeURIComponent(
-        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\nPDF attached separately — please check your downloads.`
+        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
       );
-      const waUrl = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;
-      window.open(waUrl, '_blank');
+      window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
     } catch (err: any) {
-      if (err?.name === 'AbortError') return; // user cancelled share sheet
+      if (err?.name === 'AbortError') return;
       console.error('WhatsApp quote share error:', err);
       alert('WhatsApp share failed. Please try again.');
     }
@@ -508,41 +491,9 @@ const App: React.FC = () => {
     if (!aiAnalysis) { alert('No analysis to share. Run AI analysis first.'); return; }
     try {
       const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-      // If audio exists on mobile, try sharing the WAV file
-      if (audioData && isMobile) {
-        const wavBlob = createWavBlob(audioData);
-        const wavFile = new File([wavBlob], `AI-Analysis-${config.quoteId}.wav`, { type: 'audio/wav' });
-
-        if (navigator.share && navigator.canShare && navigator.canShare({ files: [wavFile] })) {
-          await navigator.share({
-            title: `AI Analysis — ${config.quoteId}`,
-            text: aiAnalysis.substring(0, 500),
-            files: [wavFile],
-          });
-          return;
-        }
-      }
-
-      // Desktop: if audio exists, download it first
-      if (audioData) {
-        const wavBlob = createWavBlob(audioData);
-        const url = URL.createObjectURL(wavBlob);
-        const a = document.createElement('a');
-        a.href = url; a.download = `AI-Analysis-${config.quoteId}.wav`;
-        document.body.appendChild(a); a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
-
-      // Open WhatsApp with analysis text
       const truncated = aiAnalysis.length > 2000 ? aiAnalysis.substring(0, 2000) + '...' : aiAnalysis;
-      const text = encodeURIComponent(
-        `AI Analysis — ${config.quoteId}\n\n${truncated}${audioData ? '\n\nAudio brief attached separately — check downloads.' : ''}`
-      );
-      const waUrl = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;
-      window.open(waUrl, '_blank');
+      const text = encodeURIComponent(`AI Analysis — ${config.quoteId}\n\n${truncated}`);
+      window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('WhatsApp analysis share error:', err);
