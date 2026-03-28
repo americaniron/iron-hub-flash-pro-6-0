@@ -472,8 +472,10 @@ const App: React.FC = () => {
       // Build WhatsApp phone number from client info
       const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
 
-      // Try native share (works great on mobile with WhatsApp installed)
-      if (navigator.share && navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
+      // Detect mobile (only use Web Share API on mobile where WhatsApp is a share target)
+      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+      if (isMobile && navigator.share && navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
         await navigator.share({
           title: `Quote ${config.quoteId}`,
           text: `Quote from American Iron — ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}`,
@@ -482,7 +484,7 @@ const App: React.FC = () => {
         return;
       }
 
-      // Fallback: download PDF + open WhatsApp with text
+      // Desktop: download PDF + open WhatsApp web/app with text
       const url = URL.createObjectURL(pdfBlob);
       const a = document.createElement('a');
       a.href = url; a.download = pdfFile.name;
@@ -491,11 +493,12 @@ const App: React.FC = () => {
       URL.revokeObjectURL(url);
 
       const text = encodeURIComponent(
-        `📋 *Quote ${config.quoteId}*\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\n_PDF attached separately — please check your downloads._`
+        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\nPDF attached separately — please check your downloads.`
       );
       const waUrl = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;
       window.open(waUrl, '_blank');
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return; // user cancelled share sheet
       console.error('WhatsApp quote share error:', err);
       alert('WhatsApp share failed. Please try again.');
     }
@@ -505,9 +508,10 @@ const App: React.FC = () => {
     if (!aiAnalysis) { alert('No analysis to share. Run AI analysis first.'); return; }
     try {
       const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
+      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-      // If audio exists, try sharing the WAV file
-      if (audioData) {
+      // If audio exists on mobile, try sharing the WAV file
+      if (audioData && isMobile) {
         const wavBlob = createWavBlob(audioData);
         const wavFile = new File([wavBlob], `AI-Analysis-${config.quoteId}.wav`, { type: 'audio/wav' });
 
@@ -519,11 +523,14 @@ const App: React.FC = () => {
           });
           return;
         }
+      }
 
-        // Fallback: download WAV
+      // Desktop: if audio exists, download it first
+      if (audioData) {
+        const wavBlob = createWavBlob(audioData);
         const url = URL.createObjectURL(wavBlob);
         const a = document.createElement('a');
-        a.href = url; a.download = wavFile.name;
+        a.href = url; a.download = `AI-Analysis-${config.quoteId}.wav`;
         document.body.appendChild(a); a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
@@ -532,11 +539,12 @@ const App: React.FC = () => {
       // Open WhatsApp with analysis text
       const truncated = aiAnalysis.length > 2000 ? aiAnalysis.substring(0, 2000) + '...' : aiAnalysis;
       const text = encodeURIComponent(
-        `🤖 *AI Analysis — ${config.quoteId}*\n\n${truncated}${audioData ? '\n\n_Audio brief attached separately — check downloads._' : ''}`
+        `AI Analysis — ${config.quoteId}\n\n${truncated}${audioData ? '\n\nAudio brief attached separately — check downloads.' : ''}`
       );
       const waUrl = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;
       window.open(waUrl, '_blank');
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
       console.error('WhatsApp analysis share error:', err);
       alert('WhatsApp share failed. Please try again.');
     }
