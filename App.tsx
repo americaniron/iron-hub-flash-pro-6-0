@@ -11,6 +11,7 @@ import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from 
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { Login } from './components/Login.tsx';
+import { activityBridge } from './services/activityBridge.ts';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -197,6 +198,7 @@ const App: React.FC = () => {
         // Initialize server connection & migrate local data if needed
         const { serverConnected } = await dbService.initialize(user.username);
         console.log(`[App] Data layer: ${serverConnected ? 'Cloud D1 (permanent)' : 'Local IndexedDB (fallback)'}`);
+        activityBridge.init(); // Flush any queued activities from previous session
 
         const [accounts, quotes, invoicesData, paymentsData, recurringData, templatesData, inventoryData] = await Promise.all([
           dbService.getCustomerAccounts(user.username),
@@ -275,6 +277,14 @@ const App: React.FC = () => {
     }, 100);
 
     if (user) {
+      const total = cleanItems.reduce((sum, i) => sum + (i.qty * i.unitPrice), 0);
+      activityBridge.quoteCreated(
+        config.quoteId || generateDocumentId(false),
+        client.company || client.contactName || 'N/A',
+        cleanItems.length,
+        total,
+        user.username
+      );
       const inventoryParts = cleanItems.map(item => {
         const extractedImage = item.originalImages && item.originalImages.length > 0 ? item.originalImages[0] : undefined;
         return {
@@ -287,6 +297,7 @@ const App: React.FC = () => {
         };
       });
       await dbService.addOrUpdateInventoryParts(user.username, inventoryParts);
+      activityBridge.inventoryUpdated(inventoryParts.length, user.username);
 
       // Also save to image pool if images exist
       const imagesToPool = cleanItems
@@ -311,6 +322,7 @@ const App: React.FC = () => {
         const result = await analyzeQuoteData(items, thinking, config.documentLanguage);
         setAiAnalysis(result);
         await dbService.deductCredits(user.username, thinking ? 10 : 5);
+        activityBridge.analysisGenerated(config.quoteId, config.documentLanguage || 'en', user.username);
     } catch (err) {
         if (!handleApiError(err)) {
           setAiAnalysis("Analysis failed due to an unexpected error.");
@@ -480,6 +492,7 @@ const App: React.FC = () => {
         `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
       );
       window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
+      if (user) activityBridge.quoteWhatsApp(config.quoteId, client.company || client.contactName || 'N/A', user.username);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('WhatsApp quote share error:', err);
@@ -539,14 +552,21 @@ const App: React.FC = () => {
     }
     setCustomerAccounts(updatedAccounts);
     await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    if (existingAccount) {
+      activityBridge.customerUpdated(clientData.contactName || '', clientData.company || '', user.username);
+    } else {
+      activityBridge.customerAdded(clientData.contactName || '', clientData.company || '', user.username);
+    }
   }, [user, customerAccounts]);
 
 
   const handleDeleteFromBook = async (id: string) => {
     if (!user) return;
+    const deletedAccount = customerAccounts.find(c => c.id === id);
     const updatedBook = customerAccounts.filter(c => c.id !== id);
     setCustomerAccounts(updatedBook);
     await dbService.saveCustomerAccounts(user.username, updatedBook);
+    if (deletedAccount) activityBridge.customerDeleted(deletedAccount.company || deletedAccount.contactName || id, user.username);
   };
   
   const handleLogout = () => {
@@ -557,9 +577,16 @@ const App: React.FC = () => {
     if (!user) return;
     setSyncStatus('syncing');
     try {
+      // Detect newly created invoices for activity logging
+      const existingInvIds = new Set(invoices.map(i => i.id));
+      const brandNewInvoices = newInvoices.filter(i => !existingInvIds.has(i.id));
       setInvoices(newInvoices);
       await dbService.saveInvoices(user.username, newInvoices);
       setSyncStatus('stable');
+      for (const inv of brandNewInvoices) {
+        const invClient = customerAccounts.find(c => c.id === inv.clientId);
+        activityBridge.invoiceCreated(inv.id, invClient?.company || inv.clientId || 'N/A', inv.total, user.username);
+      }
     } catch (error) {
       setSyncStatus('error');
     }
@@ -664,14 +691,23 @@ const App: React.FC = () => {
       dbService.saveAllQuotes(user.username, updatedQuotes)
     ]);
     setSyncStatus('stable');
+    activityBridge.customerDeleted(accountToDelete.company || accountToDelete.contactName || accountId, user.username);
     alert(`${accountToDelete.company} has been permanently deleted.`);
   };
 
 
   const handlePaymentsUpdate = async (newPayments: Payment[]) => {
     if (!user) return;
+    // Detect newly added payments for activity logging
+    const existingIds = new Set(payments.map(p => p.id));
+    const brandNewPayments = newPayments.filter(p => !existingIds.has(p.id));
     setPayments(newPayments);
     await dbService.savePayments(user.username, newPayments);
+    // Log each new payment to activity bridge
+    for (const np of brandNewPayments) {
+      const payClient = customerAccounts.find(c => c.id === np.clientId);
+      activityBridge.paymentRecorded(np.id, payClient?.company || np.clientId || 'Unknown', np.amount, np.method || 'other', user.username);
+    }
     const invoiceIdsToUpdate = new Set(newPayments.map(p => p.invoiceId));
     let invoicesToUpdate = [...invoices];
     let changed = false;
@@ -723,6 +759,8 @@ const App: React.FC = () => {
     };
     setInitialInvoiceData(newInvoice);
     setActiveSystem('invoicing');
+    const total = serviceItems.reduce((sum, si) => sum + (si.hours * si.rate), 0);
+    activityBridge.invoiceConverted(config.quoteId, newInvoice.id, client.company || 'N/A', total, user!.username);
   };
 
   const handleNewDocumentForCustomer = (customerId: string, type: 'quote' | 'invoice') => {
@@ -756,6 +794,8 @@ const App: React.FC = () => {
       });
       setQuoteHistory(prev => [newSavedQuote, ...prev]);
       setSyncStatus('stable');
+      activityBridge.quoteSaved(config.quoteId, client.company || client.contactName || 'N/A', user.username);
+      activityBridge.cloudSynced(user.username);
       alert("Saved to Archive.");
     } catch (e) {
       setSyncStatus('error');
@@ -796,6 +836,7 @@ const App: React.FC = () => {
     link.download = `${config.quoteId}.json`;
     link.click();
     URL.revokeObjectURL(url);
+    if (user) activityBridge.quoteSaved(config.quoteId, client.company || client.contactName || 'N/A', user.username);
   };
   
   const handleLoadLocalQuote = (file: File) => {
@@ -858,6 +899,7 @@ const App: React.FC = () => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
+        activityBridge.dataExported(user.username);
     } catch (error) {
         alert("Data export failed.");
     }
@@ -930,8 +972,9 @@ const App: React.FC = () => {
             if (importedData.inventory) setInventory(importedData.inventory);
             
             setSyncStatus('stable');
+            activityBridge.dataImported(user.username);
             alert("Import successful!");
-            
+
             // We still reload to ensure all subsystems (like inventory) catch the new data
             // but the state update above makes it feel more responsive.
             window.location.reload();
@@ -987,7 +1030,7 @@ const App: React.FC = () => {
               onAnalyze={handleAnalyze} onSaveQuote={handleSaveQuote}
               onLoadQuote={handleLoadLocalQuote} onSaveDraft={() => {}}
               onResumeDraft={() => {}} onCommitToCloud={handleCommitToCloud}
-              onPrint={() => window.print()} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
+              onPrint={() => { window.print(); activityBridge.quotePrinted(config.quoteId, user.username); }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
               onConvertToInvoice={handleConvertToInvoice} onGenerateAllImages={handleGenerateAllImages}
               onExportData={handleExportData} onImportData={handleImportData}
               onDownloadImagePool={handleDownloadImagePool}
@@ -1138,19 +1181,31 @@ const App: React.FC = () => {
           <Suspense fallback={<LoadingScreen message={`Loading ${activeSystem} module...`} />}>
             {renderActiveSystem()}
           </Suspense>
-          <EmailModule 
-            isOpen={isEmailOpen} 
+          <EmailModule
+            isOpen={isEmailOpen}
             onClose={() => {
               setIsEmailOpen(false);
               setInvoiceToSend(null); // Clear the invoice to send
             }}
-            client={invoiceToSend ? customerAccounts.find(c => c.id === invoiceToSend.clientId) || client : client} 
+            client={invoiceToSend ? customerAccounts.find(c => c.id === invoiceToSend.clientId) || client : client}
             invoice={invoiceToSend}
-            config={config} 
-            items={items} 
+            config={config}
+            items={items}
             generatePdf={generatePdf}
             audioData={audioData}
             getAudioAttachment={getAudioAttachment}
+            onEmailSent={(to, subject) => {
+              if (user) {
+                const docId = invoiceToSend ? invoiceToSend.id : config.quoteId;
+                const customerName = invoiceToSend
+                  ? (customerAccounts.find(c => c.id === invoiceToSend.clientId)?.company || 'N/A')
+                  : (client.company || client.contactName || 'N/A');
+                activityBridge.quoteSentEmail(docId, customerName, to, user.username);
+                if (invoiceToSend) {
+                  activityBridge.invoiceCreated(invoiceToSend.id, customerName, invoiceToSend.total, user.username);
+                }
+              }
+            }}
           />
         </div>
 

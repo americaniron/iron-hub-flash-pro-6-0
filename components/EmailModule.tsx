@@ -12,9 +12,10 @@ interface EmailModuleProps {
   generatePdf?: () => Promise<string | null>;
   audioData?: string | null;
   getAudioAttachment?: () => Promise<string | null>;
+  onEmailSent?: (to: string, subject: string) => void;
 }
 
-export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, generatePdf, audioData, getAudioAttachment }) => {
+export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, generatePdf, audioData, getAudioAttachment, onEmailSent }) => {
   const [draft, setDraft] = useState<EmailDraft>({ to: '', subject: '', body: '' });
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -189,6 +190,7 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
         }
         await new Promise(r => setTimeout(r, 2500));
         setIsSending(false);
+        onEmailSent?.(draft.to, draft.subject);
         onClose();
       } else {
         addLog("ERROR: " + (result.error || "Failed to send email"));
