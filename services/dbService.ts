@@ -269,55 +269,23 @@ async function migrateLocalToServer(username: string): Promise<void> {
   if (!isUp) return;
 
   try {
-    // Check if server already has data for this user
+    // Check each store individually: if server is empty but local has data, push it up
     const serverData = await serverGetAll(username);
-    const hasServerData = serverData && Object.values(serverData).some(v => {
-      if (Array.isArray(v) && v.length > 0) return true;
-      if (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length > 0) return true;
-      return false;
-    });
-
-    if (hasServerData) {
-      // Server already has data — no need to migrate, server is source of truth
-      migrationDone.add(username);
-      return;
-    }
-
-    // Server is empty — check if we have local data to push up
-    const localStores: Record<string, any> = {};
-    let hasLocal = false;
 
     for (const store of STORE_NAMES) {
-      const data = await localGet(store, username);
-      if (data !== null) {
-        const isNonEmpty = Array.isArray(data) ? data.length > 0 :
-          typeof data === 'object' && data !== null ? Object.keys(data).length > 0 :
-          data !== null;
-        if (isNonEmpty) {
-          localStores[store] = data;
-          hasLocal = true;
-        }
-      }
-    }
+      const sData = serverData ? serverData[store] : null;
+      const serverHasData = sData !== null && !isEmptyDefault(store, sData);
 
-    if (hasLocal) {
-      // Migrate all local stores to server (server handles chunking for large data)
-      console.log(`[dbService] Migrating ${Object.keys(localStores).length} local stores to cloud for ${username}`);
-      // Send small stores in bulk, large stores individually
-      const smallStores: Record<string, any> = {};
-      for (const [store, storeData] of Object.entries(localStores)) {
-        const estSize = estimateSize(storeData);
-        if (estSize < D1_MAX_STORE_SIZE) {
-          smallStores[store] = storeData;
-        } else {
-          // Large stores: send individually so server can chunk them
-          console.log(`[dbService] Migrating large store '${store}' (~${(estSize / 1024 / 1024).toFixed(1)}MB) to cloud`);
-          await serverSet(username, store, storeData);
-        }
-      }
-      if (Object.keys(smallStores).length > 0) {
-        await serverSetAll(username, smallStores);
-      }
+      if (serverHasData) continue; // Server already has this store — skip
+
+      // Server is empty for this store — check if local has data
+      const localData = await localGet(store, username);
+      if (localData === null || isEmptyDefault(store, localData)) continue;
+
+      // Local has data that server doesn't — push it up
+      const estSize = estimateSize(localData);
+      console.log(`[dbService] Migrating '${store}' (~${(estSize / 1024).toFixed(0)}KB) from local to cloud`);
+      await serverSet(username, store, localData);
     }
 
     migrationDone.add(username);
