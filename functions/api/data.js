@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Cloudflare Pages Function — /api/data
 // Server-side persistent data storage using Cloudflare D1 (SQLite)
-// Replaces browser-only IndexedDB with permanent cloud storage
+// Supports chunked storage for large data (inventory, quotes, etc.)
 // D1 binding name: DB (configured in Cloudflare Pages dashboard)
 // ---------------------------------------------------------------------------
 
@@ -17,10 +17,90 @@ const VALID_STORES = [
   'drafts', 'recurring_invoices', 'templates', 'parts_image_pool', 'inventory'
 ];
 
+// D1 has a ~1MB row limit; we chunk at 800KB to be safe
+const CHUNK_SIZE = 800_000;
+
 // Handle CORS preflight
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
+
+// ---- Chunking helpers ----
+
+// Read a store, reassembling chunks if they exist
+async function readStore(DB, username, store) {
+  // First try the main row (non-chunked)
+  const row = await DB.prepare(
+    'SELECT data FROM user_data WHERE username = ? AND store_name = ?'
+  ).bind(username, store).first();
+
+  if (row) {
+    return JSON.parse(row.data);
+  }
+
+  // Check for chunked data
+  const chunks = await DB.prepare(
+    `SELECT store_name, data FROM user_data
+     WHERE username = ? AND store_name LIKE ?
+     ORDER BY store_name ASC`
+  ).bind(username, `${store}__chunk_%`).all();
+
+  if (chunks && chunks.results && chunks.results.length > 0) {
+    // Reassemble chunks
+    let combined = '';
+    for (const chunk of chunks.results) {
+      combined += chunk.data;
+    }
+    return JSON.parse(combined);
+  }
+
+  return null; // No data found
+}
+
+// Write a store, chunking if necessary
+async function writeStore(DB, username, store, data) {
+  const jsonData = JSON.stringify(data);
+
+  // First, delete any existing chunks AND the main row for this store
+  await DB.prepare(
+    `DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)`
+  ).bind(username, store, `${store}__chunk_%`).run();
+
+  if (jsonData.length <= CHUNK_SIZE) {
+    // Fits in a single row
+    await DB.prepare(
+      `INSERT INTO user_data (username, store_name, data, updated_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    ).bind(username, store, jsonData).run();
+  } else {
+    // Split into chunks
+    const statements = [];
+    let chunkIndex = 0;
+    for (let offset = 0; offset < jsonData.length; offset += CHUNK_SIZE) {
+      const chunkData = jsonData.substring(offset, offset + CHUNK_SIZE);
+      const chunkName = `${store}__chunk_${String(chunkIndex).padStart(4, '0')}`;
+      statements.push(
+        DB.prepare(
+          `INSERT INTO user_data (username, store_name, data, updated_at)
+           VALUES (?, ?, ?, datetime('now'))`
+        ).bind(username, chunkName, chunkData)
+      );
+      chunkIndex++;
+    }
+    if (statements.length > 0) {
+      await DB.batch(statements);
+    }
+    console.log(`[data.js] Stored '${store}' for ${username} in ${chunkIndex} chunks (~${(jsonData.length / 1024).toFixed(0)}KB)`);
+  }
+}
+
+// Delete a store including any chunks
+async function deleteStore(DB, username, store) {
+  await DB.prepare(
+    `DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)`
+  ).bind(username, store, `${store}__chunk_%`).run();
+}
+
 
 // GET /api/data?username=xxx&store=yyy  — Read data for a user+store
 export async function onRequestGet(context) {
@@ -45,28 +125,21 @@ export async function onRequestGet(context) {
         return Response.json({ error: `Invalid store: ${store}` }, { status: 400, headers: CORS_HEADERS });
       }
 
-      const row = await DB.prepare(
-        'SELECT data FROM user_data WHERE username = ? AND store_name = ?'
-      ).bind(username, store).first();
-
-      const data = row ? JSON.parse(row.data) : getDefaultForStore(store);
-      return Response.json({ success: true, data }, { headers: CORS_HEADERS });
+      const data = await readStore(DB, username, store);
+      return Response.json({ success: true, data: data !== null ? data : getDefaultForStore(store) }, { headers: CORS_HEADERS });
     }
 
     // No store specified — return ALL stores for this user (bulk export)
-    const rows = await DB.prepare(
-      'SELECT store_name, data FROM user_data WHERE username = ?'
-    ).bind(username).all();
-
     const result = {};
-    // Set defaults for all stores
     for (const s of VALID_STORES) {
       result[s] = getDefaultForStore(s);
     }
-    // Override with actual data
-    if (rows && rows.results) {
-      for (const row of rows.results) {
-        result[row.store_name] = JSON.parse(row.data);
+
+    // Read all stores (including chunked ones)
+    for (const s of VALID_STORES) {
+      const data = await readStore(DB, username, s);
+      if (data !== null) {
+        result[s] = data;
       }
     }
 
@@ -78,7 +151,7 @@ export async function onRequestGet(context) {
   }
 }
 
-// POST /api/data  — Write data for a user+store
+// POST /api/data  — Write data for a user+store (auto-chunks if needed)
 // Body: { username, store, data }
 export async function onRequestPost(context) {
   const { env, request } = context;
@@ -106,17 +179,8 @@ export async function onRequestPost(context) {
   }
 
   try {
-    const jsonData = JSON.stringify(data);
-
-    await DB.prepare(
-      `INSERT INTO user_data (username, store_name, data, updated_at)
-       VALUES (?, ?, ?, datetime('now'))
-       ON CONFLICT(username, store_name)
-       DO UPDATE SET data = excluded.data, updated_at = datetime('now')`
-    ).bind(username, store, jsonData).run();
-
+    await writeStore(DB, username, store, data);
     return Response.json({ success: true }, { headers: CORS_HEADERS });
-
   } catch (err) {
     console.error('D1 write error:', err);
     return Response.json({ error: 'Database write failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
@@ -147,26 +211,15 @@ export async function onRequestPut(context) {
   }
 
   try {
-    // Use a batch operation for efficiency
-    const statements = [];
+    let storesWritten = 0;
     for (const [storeName, data] of Object.entries(stores)) {
       if (VALID_STORES.includes(storeName)) {
-        statements.push(
-          DB.prepare(
-            `INSERT INTO user_data (username, store_name, data, updated_at)
-             VALUES (?, ?, ?, datetime('now'))
-             ON CONFLICT(username, store_name)
-             DO UPDATE SET data = excluded.data, updated_at = datetime('now')`
-          ).bind(username, storeName, JSON.stringify(data))
-        );
+        await writeStore(DB, username, storeName, data);
+        storesWritten++;
       }
     }
 
-    if (statements.length > 0) {
-      await DB.batch(statements);
-    }
-
-    return Response.json({ success: true, storesWritten: statements.length }, { headers: CORS_HEADERS });
+    return Response.json({ success: true, storesWritten }, { headers: CORS_HEADERS });
 
   } catch (err) {
     console.error('D1 bulk write error:', err);
@@ -192,10 +245,9 @@ export async function onRequestDelete(context) {
 
   try {
     if (store) {
-      await DB.prepare(
-        'DELETE FROM user_data WHERE username = ? AND store_name = ?'
-      ).bind(username, store).run();
+      await deleteStore(DB, username, store);
     } else {
+      // Delete ALL stores for this user (including chunks)
       await DB.prepare(
         'DELETE FROM user_data WHERE username = ?'
       ).bind(username).run();

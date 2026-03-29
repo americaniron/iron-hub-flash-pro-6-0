@@ -65,7 +65,7 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, store, data }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(30000), // 30s for large chunked stores
     });
     return res.ok;
   } catch {
@@ -218,11 +218,8 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
       if (isEmptyDefault(storeName, serverData)) {
         const localData = await localGet<T>(storeName, username);
         if (localData !== null && !isEmptyDefault(storeName, localData)) {
-          // Local has real data that server doesn't — use local and try to push to server
-          const estSize = estimateSize(localData);
-          if (estSize < D1_MAX_STORE_SIZE) {
-            serverSet(username, storeName, localData).catch(() => {});
-          }
+          // Local has real data that server doesn't — use local and push to server
+          serverSet(username, storeName, localData).catch(() => {});
           return localData;
         }
       }
@@ -237,10 +234,7 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   if (localData !== null) {
     // If server is up but returned null (error), push local data to server (migration)
     if (isUp) {
-      const estSize = estimateSize(localData);
-      if (estSize < D1_MAX_STORE_SIZE) {
-        serverSet(username, storeName, localData).catch(() => {});
-      }
+      serverSet(username, storeName, localData).catch(() => {});
     }
     return localData;
   }
@@ -250,9 +244,9 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
 
 async function setData<T>(storeName: string, username: string, data: T): Promise<void> {
   const isUp = await checkServerAvailability();
-  const estSize = estimateSize(data);
 
-  if (isUp && estSize < D1_MAX_STORE_SIZE) {
+  if (isUp) {
+    // Server handles chunking for large data — always try server first
     const ok = await serverSet(username, storeName, data);
     if (ok) {
       // Also cache locally
@@ -261,11 +255,8 @@ async function setData<T>(storeName: string, username: string, data: T): Promise
     }
   }
 
-  // Fallback or large data: write to local IndexedDB
+  // Fallback: write to local IndexedDB if server is down
   await localSet(storeName, username, data);
-  if (estSize >= D1_MAX_STORE_SIZE) {
-    console.log(`[dbService] Store '${storeName}' is ~${(estSize / 1024 / 1024).toFixed(1)}MB — saved to local storage (exceeds D1 limit)`);
-  }
 }
 
 // ---- Migration: push local IndexedDB data to server on first connect ----
@@ -310,18 +301,21 @@ async function migrateLocalToServer(username: string): Promise<void> {
     }
 
     if (hasLocal) {
-      // Migrate store-by-store, skipping stores that are too large for D1
+      // Migrate all local stores to server (server handles chunking for large data)
+      console.log(`[dbService] Migrating ${Object.keys(localStores).length} local stores to cloud for ${username}`);
+      // Send small stores in bulk, large stores individually
       const smallStores: Record<string, any> = {};
       for (const [store, storeData] of Object.entries(localStores)) {
         const estSize = estimateSize(storeData);
         if (estSize < D1_MAX_STORE_SIZE) {
           smallStores[store] = storeData;
         } else {
-          console.log(`[dbService] Skipping migration of '${store}' (~${(estSize / 1024 / 1024).toFixed(1)}MB) — exceeds D1 limit`);
+          // Large stores: send individually so server can chunk them
+          console.log(`[dbService] Migrating large store '${store}' (~${(estSize / 1024 / 1024).toFixed(1)}MB) to cloud`);
+          await serverSet(username, store, storeData);
         }
       }
       if (Object.keys(smallStores).length > 0) {
-        console.log(`[dbService] Migrating ${Object.keys(smallStores).length} local stores to cloud for ${username}`);
         await serverSetAll(username, smallStores);
       }
     }
@@ -477,28 +471,25 @@ export const dbService = {
   async importAllUserData(username: string, data: Record<string, any>): Promise<void> {
     const isUp = await checkServerAvailability();
 
-    // Import store-by-store to handle large stores gracefully
+    // Import store-by-store — server handles chunking for large stores
     for (const [store, storeData] of Object.entries(data)) {
       if (!STORE_NAMES.includes(store)) continue;
 
       const estSize = estimateSize(storeData);
 
-      if (isUp && estSize < D1_MAX_STORE_SIZE) {
-        // Small enough for D1 — write to server
+      if (isUp) {
+        // Write to server (server auto-chunks if data is large)
         const ok = await serverSet(username, store, storeData);
         if (ok) {
           console.log(`[import] ${store}: saved to cloud (~${(estSize / 1024).toFixed(0)}KB)`);
+        } else {
+          console.warn(`[import] ${store}: cloud save failed, saving locally only`);
         }
-      } else if (isUp && estSize >= D1_MAX_STORE_SIZE) {
-        // Too large for D1 — DELETE any stale D1 entry so getData doesn't return old server data
-        console.log(`[import] ${store}: ~${(estSize / 1024 / 1024).toFixed(1)}MB — too large for D1, saving locally only`);
-        serverDelete(username, store).catch(() => {});
       }
 
-      // Always write to IndexedDB (critical for large stores, and as cache for small ones)
+      // Always write to IndexedDB as local cache
       try {
         await localSet(store, username, storeData);
-        console.log(`[import] ${store}: saved to local storage`);
       } catch (err) {
         console.error(`[import] ${store}: local save failed`, err);
       }
