@@ -12,6 +12,7 @@ import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { Login } from './components/Login.tsx';
 import { activityBridge } from './services/activityBridge.ts';
+import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
 import html2pdf from 'html2pdf.js';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
@@ -139,6 +140,9 @@ const App: React.FC = () => {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('stable');
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [exportedFiles, setExportedFiles] = useState<string[]>([]);
+  const [bridgeSyncing, setBridgeSyncing] = useState(false);
+  const [bridgeProgress, setBridgeProgress] = useState<BridgeSyncProgress | null>(null);
+  const [bridgeSyncResult, setBridgeSyncResult] = useState<BridgeSyncResult | null>(null);
 
   const [client, setClient] = useState<ClientInfo>({ 
     accountNumber: '', company: '', contactName: '', email: '', phone: '',
@@ -950,6 +954,47 @@ const App: React.FC = () => {
     setExportedFiles(exported);
   };
 
+  const handlePushToSuite = async () => {
+    if (!user) return;
+    setBridgeSyncing(true);
+    setBridgeProgress({ stage: 'starting', detail: 'Checking connection...', percent: 0 });
+    setBridgeSyncResult(null);
+
+    try {
+      const connected = await checkBridgeConnection();
+      if (!connected) {
+        setBridgeSyncResult({
+          success: false,
+          timestamp: new Date().toISOString(),
+          accounts: { pushed: 0, failed: 0 },
+          invoices: { pushed: 0, failed: 0 },
+          inventory: { pushed: 0, failed: 0 },
+          payments: { pushed: 0, failed: 0 },
+          errors: ['Cannot reach Iron Hub Suite. Check your internet connection or try again later.'],
+        });
+        setBridgeSyncing(false);
+        return;
+      }
+
+      const result = await pushToSuite(dbService, user.username, (p) => {
+        setBridgeProgress(p);
+      });
+      setBridgeSyncResult(result);
+    } catch (err: any) {
+      setBridgeSyncResult({
+        success: false,
+        timestamp: new Date().toISOString(),
+        accounts: { pushed: 0, failed: 0 },
+        invoices: { pushed: 0, failed: 0 },
+        inventory: { pushed: 0, failed: 0 },
+        payments: { pushed: 0, failed: 0 },
+        errors: [err.message || 'Unknown error during sync'],
+      });
+    } finally {
+      setBridgeSyncing(false);
+    }
+  };
+
   const handleImportData = (file: File) => {
     if (!user || !window.confirm("This will overwrite all current data. This action cannot be undone. Are you sure?")) return;
     const reader = new FileReader();
@@ -1218,11 +1263,11 @@ const App: React.FC = () => {
                 <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl -mr-20 -mt-20"></div>
                 <div className="relative z-10 flex items-center justify-between">
                   <div>
-                    <h2 className="text-xl font-black uppercase tracking-tight text-white">Export to IronSuite</h2>
-                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Download CSVs for IronSuite Data Import Center</p>
+                    <h2 className="text-xl font-black uppercase tracking-tight text-white">Sync to IronSuite</h2>
+                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Push directly or download CSVs</p>
                   </div>
                   <button
-                    onClick={() => { setShowSyncModal(false); setExportedFiles([]); }}
+                    onClick={() => { setShowSyncModal(false); setExportedFiles([]); setBridgeSyncResult(null); setBridgeProgress(null); }}
                     className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -1231,15 +1276,82 @@ const App: React.FC = () => {
               </div>
 
               {/* Body */}
-              <div className="p-8 space-y-6">
-                {/* Instructions */}
-                <div className="bg-blue-50 rounded-xl p-4 border border-blue-200/50">
-                  <p className="text-[11px] font-black text-blue-900 uppercase tracking-wider mb-1">How It Works</p>
-                  <p className="text-[10px] font-bold text-blue-700 leading-relaxed">
-                    Download CSV files below, then import them into IronSuite via
-                    <span className="font-black"> Settings &rarr; Data Import Center</span>.
-                    Each file matches IronSuite's expected column format.
+              <div className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
+                {/* ── PUSH DIRECTLY TO SUITE ── */}
+                <div className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl p-5 border border-emerald-200/60">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center">
+                      <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
+                    </div>
+                    <div>
+                      <p className="text-[12px] font-black text-emerald-900 uppercase tracking-wider">Push Directly to Suite</p>
+                      <p className="text-[9px] font-bold text-emerald-600">One-click sync — no CSV files needed</p>
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-bold text-emerald-700 leading-relaxed mb-3">
+                    Pushes all accounts, invoices, inventory, and payments directly to Iron Hub Suite via the bridge API.
                   </p>
+
+                  {/* Progress bar */}
+                  {bridgeSyncing && bridgeProgress && (
+                    <div className="mb-3">
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-[9px] font-black text-emerald-800 uppercase">{bridgeProgress.stage}</span>
+                        <span className="text-[9px] font-bold text-emerald-600">{bridgeProgress.percent}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-emerald-200 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-600 rounded-full transition-all duration-300" style={{ width: `${bridgeProgress.percent}%` }}></div>
+                      </div>
+                      <p className="text-[9px] font-bold text-emerald-600 mt-1">{bridgeProgress.detail}</p>
+                    </div>
+                  )}
+
+                  {/* Sync result */}
+                  {bridgeSyncResult && !bridgeSyncing && (
+                    <div className={`rounded-lg p-3 mb-3 border ${bridgeSyncResult.success ? 'bg-emerald-100 border-emerald-300' : 'bg-red-50 border-red-200'}`}>
+                      <p className={`text-[10px] font-black uppercase ${bridgeSyncResult.success ? 'text-emerald-800' : 'text-red-800'}`}>
+                        {bridgeSyncResult.success ? '✓ Sync Complete' : '✗ Sync Had Errors'}
+                      </p>
+                      <div className="grid grid-cols-2 gap-1 mt-2">
+                        <span className="text-[9px] font-bold text-slate-600">Accounts: {bridgeSyncResult.accounts.pushed} pushed</span>
+                        <span className="text-[9px] font-bold text-slate-600">Invoices: {bridgeSyncResult.invoices.pushed} pushed</span>
+                        <span className="text-[9px] font-bold text-slate-600">Inventory: {bridgeSyncResult.inventory.pushed} pushed</span>
+                        <span className="text-[9px] font-bold text-slate-600">Payments: {bridgeSyncResult.payments.pushed} pushed</span>
+                      </div>
+                      {bridgeSyncResult.errors.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {bridgeSyncResult.errors.map((err, i) => (
+                            <p key={i} className="text-[9px] font-bold text-red-600">⚠ {err}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handlePushToSuite}
+                    disabled={bridgeSyncing || (customerAccounts.length === 0 && quoteHistory.length === 0 && invoices.length === 0 && inventory.length === 0)}
+                    className="w-full px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-400 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none flex items-center justify-center gap-2"
+                  >
+                    {bridgeSyncing ? (
+                      <>
+                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                        Syncing...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
+                        Push All Data to Suite
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Divider */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-px bg-slate-200"></div>
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Or Export as CSV</span>
+                  <div className="flex-1 h-px bg-slate-200"></div>
                 </div>
 
                 {/* Export Buttons */}
@@ -1297,7 +1409,7 @@ const App: React.FC = () => {
               {/* Footer */}
               <div className="px-8 py-5 bg-slate-50 border-t border-slate-200/60 flex justify-between">
                 <button
-                  onClick={() => { setShowSyncModal(false); setExportedFiles([]); }}
+                  onClick={() => { setShowSyncModal(false); setExportedFiles([]); setBridgeSyncResult(null); setBridgeProgress(null); }}
                   className="px-6 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 transition-colors"
                 >
                   Close
