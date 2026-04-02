@@ -25,7 +25,7 @@ export interface BridgeSyncResult {
   errors: string[];
 }
 
-async function bridgeFetch(endpoint: string, body: any): Promise<any> {
+async function bridgeFetch(endpoint: string, body: any, timeoutMs = 30000): Promise<any> {
   const res = await fetch(`${SUITE_BASE}/api/bridge/${endpoint}`, {
     method: 'POST',
     headers: {
@@ -33,6 +33,7 @@ async function bridgeFetch(endpoint: string, body: any): Promise<any> {
       'X-API-Key': API_KEY,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
@@ -62,10 +63,12 @@ export async function pushToSuite(
 
   try {
     // ── Step 1: Push Accounts/Customers ──
+    // Note: This creates new customer records each time. Duplicates can be
+    // merged in Suite later. We need the returned IDs to map invoices/payments.
     onProgress?.({ stage: 'accounts', detail: 'Loading accounts...', percent: 5 });
     let accounts: any[] = [];
     try {
-      accounts = await db.getAccounts(username);
+      accounts = await db.getCustomerAccounts(username);
     } catch { accounts = []; }
 
     if (accounts.length > 0) {
@@ -170,8 +173,8 @@ export async function pushToSuite(
     } catch { inventory = []; }
 
     if (inventory.length > 0) {
-      // Batch in groups of 250 to avoid timeouts
-      const BATCH = 250;
+      // Batch in groups of 100 to avoid timeouts on Replit
+      const BATCH = 100;
       let pushed = 0;
       let failed = 0;
       for (let i = 0; i < inventory.length; i += BATCH) {
@@ -189,7 +192,7 @@ export async function pushToSuite(
             imageUrl: item.imageUrl || '',
             quantity: 1,
           }));
-          const resp = await bridgeFetch('import-items', { items: itemPayload });
+          const resp = await bridgeFetch('import-items', { items: itemPayload }, 60000);
           pushed += resp.count || 0;
         } catch (err: any) {
           failed += batch.length;
