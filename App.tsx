@@ -957,7 +957,7 @@ const App: React.FC = () => {
   const handlePushToSuite = async () => {
     if (!user) return;
     setBridgeSyncing(true);
-    setBridgeProgress({ stage: 'starting', detail: 'Checking connection...', percent: 0 });
+    setBridgeProgress({ stage: 'connecting', detail: 'Waking up Iron Hub Suite (may take a moment)...', percent: 0 });
     setBridgeSyncResult(null);
 
     try {

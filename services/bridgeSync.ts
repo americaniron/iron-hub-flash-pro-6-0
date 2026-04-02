@@ -250,13 +250,18 @@ export async function pushToSuite(
  * Quick connectivity check to verify bridge API is reachable
  */
 export async function checkBridgeConnection(): Promise<boolean> {
-  try {
-    const res = await fetch(`${SUITE_BASE}/api/bridge/diag`, {
-      headers: { 'X-API-Key': API_KEY },
-      signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
-  } catch {
-    return false;
+  // Replit apps can take up to 30s to wake from sleep — try twice
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${SUITE_BASE}/api/bridge/diag`, {
+        headers: { 'X-API-Key': API_KEY },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.ok) return true;
+    } catch {
+      // first attempt may fail while Replit wakes up — retry
+      if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
+    }
   }
+  return false;
 }
