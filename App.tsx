@@ -7,7 +7,7 @@ import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
-import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
+import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/claudeService.ts';
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { Login } from './components/Login.tsx';

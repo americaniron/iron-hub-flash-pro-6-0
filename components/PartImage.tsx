@@ -6,7 +6,7 @@
 
 
 import React, { useState, useEffect } from 'react';
-import { editPartImage } from '../services/geminiService.ts';
+import { editPartImage } from '../services/claudeService.ts';
 import { PhotoMode } from '../types.ts';
 
 interface PartImageProps {

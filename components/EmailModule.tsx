@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ClientInfo, AppConfig, QuoteItem, EmailDraft, InvoiceData } from '../types.ts';
-import { generateEmailDraft } from '../services/geminiService.ts';
+import { generateEmailDraft } from '../services/claudeService.ts';
 
 interface EmailModuleProps {
   isOpen: boolean;
