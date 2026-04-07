@@ -429,20 +429,20 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           {/* Gold accent line */}
           <div style={{ background: '#d4a843', height: '5px', width: '100%' }}></div>
           {/* Dark header bar */}
-          <div style={{ background: '#1a1a2e', padding: '24px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', overflow: 'hidden' }} dir="ltr">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexShrink: 0 }}>
-              <div style={{ width: '100px', height: '100px', flexShrink: 0 }}>
+          <div style={{ background: '#1a1a2e', padding: '20px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} dir="ltr">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', minWidth: 0, flex: '1 1 auto' }}>
+              <div style={{ width: '90px', height: '90px', flexShrink: 0 }}>
                 {customLogo ? <img src={customLogo} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="Custom Logo" /> : <Logo className="w-full h-full" />}
               </div>
-              <div>
-                <div style={{ color: '#fff', fontSize: '28px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
-                <div style={{ color: '#d4a843', fontSize: '11px', letterSpacing: '4px', marginTop: '4px', fontWeight: 600 }}>{t.logistics.toUpperCase()}</div>
-                <div style={{ color: '#ccc', fontSize: '11px', marginTop: '8px' }}>13930 N. DALE MABRY HWY.</div>
-                <div style={{ color: '#ccc', fontSize: '11px' }}>+1 (850) 777-3797</div>
-                <div style={{ color: '#d4a843', fontSize: '11px' }}>WWW.AMERICANIRONUS.COM</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ color: '#fff', fontSize: '26px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
+                <div style={{ color: '#d4a843', fontSize: '10px', letterSpacing: '4px', marginTop: '3px', fontWeight: 600 }}>{t.logistics.toUpperCase()}</div>
+                <div style={{ color: '#ccc', fontSize: '10px', marginTop: '6px' }}>13930 N. DALE MABRY HWY.</div>
+                <div style={{ color: '#ccc', fontSize: '10px' }}>+1 (850) 777-3797</div>
+                <div style={{ color: '#d4a843', fontSize: '10px' }}>WWW.AMERICANIRONUS.COM</div>
               </div>
             </div>
-            <div style={{ color: '#fff', fontSize: '52px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '3px', flexShrink: 0, paddingLeft: '20px' }}>
+            <div style={{ color: '#fff', fontSize: '48px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '2px', flexShrink: 0, marginLeft: '16px', whiteSpace: 'nowrap' }}>
               {config.isInvoice ? t.invoice.toUpperCase() : t.quote.toUpperCase()}
             </div>
           </div>
