@@ -190,6 +190,8 @@ export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
   for (const quote of quotes) {
     const items = quote.payload?.items || [];
     const customerName = quote.payload?.client?.company || '';
+    const markupPct = quote.payload?.config?.markupPercentage || 0;
+    const markupFactor = 1 + (markupPct / 100);
     const issueDate = quote.timestamp
       ? new Date(quote.timestamp).toLocaleDateString('en-US')
       : '';
@@ -198,7 +200,6 @@ export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
       : '';
 
     if (items.length === 0) {
-      // Quote with no line items — still export the header
       rows.push({
         'Quote Number': quote.id || '',
         'Customer Name': customerName,
@@ -215,7 +216,9 @@ export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
       });
     } else {
       for (const item of items) {
-        const lineTotal = (item.qty || 1) * (item.unitPrice || 0);
+        // Apply markup to get final selling price
+        const sellPrice = Math.round((item.unitPrice || 0) * markupFactor * 100) / 100;
+        const lineTotal = Math.round((item.qty || 1) * sellPrice * 100) / 100;
         rows.push({
           'Quote Number': quote.id || '',
           'Customer Name': customerName,
@@ -224,7 +227,7 @@ export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
           'Valid Until': validUntil,
           'Line Description': item.desc || item.partNo || '',
           'Quantity': item.qty || 1,
-          'Unit Price ($)': item.unitPrice || 0,
+          'Unit Price ($)': sellPrice,
           'Subtotal ($)': lineTotal,
           'Total ($)': quote.total || 0,
           'Status': 'Draft',

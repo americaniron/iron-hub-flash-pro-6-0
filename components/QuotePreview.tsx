@@ -338,7 +338,12 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           .summary-table { table-layout: auto !important; }
           .summary-table td { border-bottom: none !important; padding: 2pt 0 !important; }
 
-          /* Rule 4: Standardize document typography using a 'pt' scale. */
+          /* Rule 4: Suite-style header banner for print */
+          .print-header {
+            margin: -0.5in !important;
+            margin-bottom: 12pt !important;
+            width: calc(100% + 1in) !important;
+          }
           .print-header h1 { font-size: 26pt !important; color: #000 !important; }
           .print-header h2 { font-size: 20pt !important; }
           .print-header p { font-size: 8.5pt !important; }
@@ -357,9 +362,10 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           .line-item-notes { font-size: 7.5pt !important; }
 
           /* Rule 5: Stabilize layout of summary blocks to prevent page-break issues. */
-          .ai-analysis-box, .terms-box, .summary-table tr, .totals-container { 
+          .ai-analysis-box, .terms-box, .terms-box p, .summary-table tr, .totals-container {
             page-break-inside: avoid !important;
             break-inside: avoid !important;
+            page-break-before: auto !important;
           }
           
           .totals-container {
@@ -418,30 +424,49 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
       <div className="p-14 print:p-0 print-root pdf-generation-mode-root">
         
-        {/* Quotation Header Section */}
-        <div className="flex justify-between items-start mb-16 print:mb-6 print-header">
-          <div className={`flex items-center gap-10 print:gap-4 ${isRtl ? 'flex-row-reverse text-right' : ''}`}>
-            <div className="w-32 h-32 bg-slate-50 rounded-[2rem] flex items-center justify-center p-6 print:w-28 print:h-28 print:rounded-none shadow-inner print:shadow-none border border-slate-200">
-               {customLogo ? <img src={customLogo} className="w-full h-full object-contain drop-shadow-sm" alt="Custom Logo" /> : <Logo className="w-full h-full drop-shadow-sm" />}
-            </div>
-            <div>
-              <h2 className="text-4xl font-black uppercase tracking-tighter text-cat-black">American Iron LLC</h2>
-              <p className="text-[11px] font-bold text-slate-400 uppercase tracking-[0.4em] mt-2">{t.logistics}</p>
-              <div className={`text-[10px] text-slate-500 mt-6 uppercase font-bold leading-relaxed print:text-[6.5pt] print:text-black print:mt-1 ${isRtl ? 'text-right' : 'text-left'}`}>
-                <p>{t.address}</p>
-                <p>{t.tel}</p>
-                <p className="text-cat-yellow">{t.website}</p>
+        {/* Suite-Style Header Banner */}
+        <div className="print-header -mx-14 -mt-14 print:mx-0 print:mt-0 mb-8 print:mb-4">
+          {/* Gold accent line */}
+          <div style={{ background: '#d4a843', height: '4px', width: '100%' }}></div>
+          {/* Dark header bar */}
+          <div style={{ background: '#1a1a2e', padding: '16px 30px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} dir="ltr">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+              <div className="w-24 h-24 flex items-center justify-center">
+                {customLogo ? <img src={customLogo} className="w-full h-full object-contain" alt="Custom Logo" /> : <Logo className="w-full h-full" />}
+              </div>
+              <div>
+                <div style={{ color: '#fff', fontSize: '24px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
+                <div style={{ color: '#d4a843', fontSize: '9px', letterSpacing: '3px', marginTop: '2px' }}>{t.logistics.toUpperCase()}</div>
+                <div style={{ color: '#ccc', fontSize: '8px', marginTop: '6px' }}>{t.address.toUpperCase()}</div>
+                <div style={{ color: '#ccc', fontSize: '8px' }}>{t.tel.toUpperCase()}</div>
+                <div style={{ color: '#d4a843', fontSize: '8px', textDecoration: 'underline' }}>{t.website.toUpperCase()}</div>
               </div>
             </div>
-          </div>
-          
-          <div className={isRtl ? 'text-left' : 'text-right'}>
-            <h1 className="text-8xl font-black uppercase tracking-tighter -mb-2 opacity-5 select-none" style={{ color: '#000' }}>{config.isInvoice ? t.invoice : t.quote}</h1>
-            <div className="space-y-2 relative z-10 bg-slate-50/50 p-6 rounded-3xl border border-slate-100 backdrop-blur-sm">
-              <p className="text-[11px] font-black uppercase text-slate-400 tracking-widest">{t.docId}: <span className="text-cat-black font-mono ml-3 font-black">{config.quoteId}</span></p>
-              <p className="text-[11px] font-black uppercase text-slate-400 tracking-widest">{t.issueDate}: <span className="text-cat-black font-mono ml-3 font-black">{new Date().toLocaleDateString()}</span></p>
-              <p className="text-[11px] font-black uppercase text-slate-400 tracking-widest">{t.validUntil}: <span className="text-cat-black font-mono ml-3 font-black">{config.expirationDate}</span></p>
+            <div style={{ color: '#fff', fontSize: '64px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '4px', opacity: 0.9 }}>
+              {config.isInvoice ? t.invoice.toUpperCase() : t.quote.toUpperCase()}
             </div>
+          </div>
+        </div>
+
+        {/* REF ID / Date Info */}
+        <div className={`flex mb-6 print:mb-4 ${isRtl ? 'justify-start' : 'justify-end'}`}>
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <table className="text-[11px]">
+              <tbody>
+                <tr>
+                  <td className="px-3 py-1.5 font-black uppercase tracking-widest text-slate-400 text-[9px]" style={{ color: '#d4a843' }}>{t.docId}:</td>
+                  <td className={`px-3 py-1.5 font-mono font-black text-cat-black ${isRtl ? 'text-left' : 'text-right'}`}>{config.quoteId}</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-1.5 font-black uppercase tracking-widest text-[9px]" style={{ color: '#d4a843' }}>{t.issueDate}:</td>
+                  <td className={`px-3 py-1.5 font-mono font-black text-cat-black ${isRtl ? 'text-left' : 'text-right'}`}>{new Date().toLocaleDateString()}</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-1.5 font-black uppercase tracking-widest text-[9px]" style={{ color: '#d4a843' }}>{t.validUntil}:</td>
+                  <td className={`px-3 py-1.5 font-mono font-black text-cat-black ${isRtl ? 'text-left' : 'text-right'}`}>{config.expirationDate}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
