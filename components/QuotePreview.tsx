@@ -427,22 +427,22 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
         {/* Suite-Style Header Banner */}
         <div className="print-header -mx-14 -mt-14 print:mx-0 print:mt-0 mb-8 print:mb-4">
           {/* Gold accent line */}
-          <div style={{ background: '#d4a843', height: '4px', width: '100%' }}></div>
+          <div style={{ background: '#d4a843', height: '5px', width: '100%' }}></div>
           {/* Dark header bar */}
-          <div style={{ background: '#1a1a2e', padding: '16px 30px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} dir="ltr">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              <div className="w-24 h-24 flex items-center justify-center">
-                {customLogo ? <img src={customLogo} className="w-full h-full object-contain" alt="Custom Logo" /> : <Logo className="w-full h-full" />}
+          <div style={{ background: '#1a1a2e', padding: '24px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', overflow: 'hidden' }} dir="ltr">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexShrink: 0 }}>
+              <div style={{ width: '100px', height: '100px', flexShrink: 0 }}>
+                {customLogo ? <img src={customLogo} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="Custom Logo" /> : <Logo className="w-full h-full" />}
               </div>
               <div>
-                <div style={{ color: '#fff', fontSize: '24px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
-                <div style={{ color: '#d4a843', fontSize: '9px', letterSpacing: '3px', marginTop: '2px' }}>{t.logistics.toUpperCase()}</div>
-                <div style={{ color: '#ccc', fontSize: '8px', marginTop: '6px' }}>{t.address.toUpperCase()}</div>
-                <div style={{ color: '#ccc', fontSize: '8px' }}>{t.tel.toUpperCase()}</div>
-                <div style={{ color: '#d4a843', fontSize: '8px', textDecoration: 'underline' }}>{t.website.toUpperCase()}</div>
+                <div style={{ color: '#fff', fontSize: '28px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
+                <div style={{ color: '#d4a843', fontSize: '11px', letterSpacing: '4px', marginTop: '4px', fontWeight: 600 }}>{t.logistics.toUpperCase()}</div>
+                <div style={{ color: '#ccc', fontSize: '11px', marginTop: '8px' }}>13930 N. DALE MABRY HWY.</div>
+                <div style={{ color: '#ccc', fontSize: '11px' }}>+1 (850) 777-3797</div>
+                <div style={{ color: '#d4a843', fontSize: '11px' }}>WWW.AMERICANIRONUS.COM</div>
               </div>
             </div>
-            <div style={{ color: '#fff', fontSize: '64px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '4px', opacity: 0.9 }}>
+            <div style={{ color: '#fff', fontSize: '52px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '3px', flexShrink: 0, paddingLeft: '20px' }}>
               {config.isInvoice ? t.invoice.toUpperCase() : t.quote.toUpperCase()}
             </div>
           </div>
