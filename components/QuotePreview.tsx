@@ -275,7 +275,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Rule 1: Define page layout and guarantee margins. */
           @page {
             size: LETTER;
-            margin: 0.5in !important;
+            margin: 0 0.5in 0.5in 0.5in !important;
           }
 
           /* Rule 2: Reset and prepare the document body for printing. */
@@ -340,9 +340,26 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
           /* Rule 4: Suite-style header banner for print */
           .print-header {
-            margin: -0.5in !important;
+            margin: 0 !important;
             margin-bottom: 12pt !important;
-            width: calc(100% + 1in) !important;
+            width: 100% !important;
+          }
+          .print-header > div:last-child {
+            padding: 14pt 20pt !important;
+          }
+          .print-header .quote-heading {
+            font-size: 36pt !important;
+            letter-spacing: 1px !important;
+          }
+          .print-header .company-name {
+            font-size: 18pt !important;
+          }
+          .print-header .company-detail {
+            font-size: 8pt !important;
+          }
+          .print-header .logo-box {
+            width: 65pt !important;
+            height: 65pt !important;
           }
           .print-header h1 { font-size: 26pt !important; color: #000 !important; }
           .print-header h2 { font-size: 20pt !important; }
@@ -425,24 +442,24 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
       <div className="p-14 print:p-0 print-root pdf-generation-mode-root">
         
         {/* Suite-Style Header Banner */}
-        <div className="print-header -mx-14 -mt-14 print:mx-0 print:mt-0 mb-8 print:mb-4">
+        <div className="print-header mb-8 print:mb-4">
           {/* Gold accent line */}
           <div style={{ background: '#d4a843', height: '5px', width: '100%' }}></div>
           {/* Dark header bar */}
           <div style={{ background: '#1a1a2e', padding: '20px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} dir="ltr">
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px', minWidth: 0, flex: '1 1 auto' }}>
-              <div style={{ width: '90px', height: '90px', flexShrink: 0 }}>
+              <div className="logo-box" style={{ width: '90px', height: '90px', flexShrink: 0 }}>
                 {customLogo ? <img src={customLogo} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="Custom Logo" /> : <Logo className="w-full h-full" />}
               </div>
               <div style={{ minWidth: 0 }}>
-                <div style={{ color: '#fff', fontSize: '26px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
-                <div style={{ color: '#d4a843', fontSize: '10px', letterSpacing: '4px', marginTop: '3px', fontWeight: 600 }}>{t.logistics.toUpperCase()}</div>
-                <div style={{ color: '#ccc', fontSize: '10px', marginTop: '6px' }}>13930 N. DALE MABRY HWY.</div>
-                <div style={{ color: '#ccc', fontSize: '10px' }}>+1 (850) 777-3797</div>
-                <div style={{ color: '#d4a843', fontSize: '10px' }}>WWW.AMERICANIRONUS.COM</div>
+                <div className="company-name" style={{ color: '#fff', fontSize: '26px', fontWeight: 'bold', letterSpacing: '1px' }}>AMERICAN IRON LLC</div>
+                <div className="company-detail" style={{ color: '#d4a843', fontSize: '10px', letterSpacing: '4px', marginTop: '3px', fontWeight: 600 }}>{t.logistics.toUpperCase()}</div>
+                <div className="company-detail" style={{ color: '#ccc', fontSize: '10px', marginTop: '6px' }}>13930 N. DALE MABRY HWY.</div>
+                <div className="company-detail" style={{ color: '#ccc', fontSize: '10px' }}>+1 (850) 777-3797</div>
+                <div className="company-detail" style={{ color: '#d4a843', fontSize: '10px' }}>WWW.AMERICANIRONUS.COM</div>
               </div>
             </div>
-            <div style={{ color: '#fff', fontSize: '48px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '2px', flexShrink: 0, marginLeft: '16px', whiteSpace: 'nowrap' }}>
+            <div className="quote-heading" style={{ color: '#fff', fontSize: '48px', fontWeight: 'bold', fontStyle: 'italic', letterSpacing: '2px', flexShrink: 0, marginLeft: '16px', whiteSpace: 'nowrap' }}>
               {config.isInvoice ? t.invoice.toUpperCase() : t.quote.toUpperCase()}
             </div>
           </div>
