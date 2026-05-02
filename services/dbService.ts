@@ -1,6 +1,5 @@
 
 import { CustomerAccount, SavedQuote, InvoiceData, Payment, RecurringInvoice, InvoiceTemplate, InventoryPart } from '../types.ts';
-import { apiFetch } from './session.ts';
 
 /**
  * Enterprise Cloud Repository Service — V2 (Server-Backed)
@@ -49,7 +48,7 @@ async function checkServerAvailability(): Promise<boolean> {
 // ---- Server API helpers ----
 async function serverGet<T>(username: string, store: string): Promise<T | null> {
   try {
-    const res = await apiFetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
@@ -62,7 +61,7 @@ async function serverGet<T>(username: string, store: string): Promise<T | null> 
 
 async function serverSet(username: string, store: string, data: any): Promise<boolean> {
   try {
-    const res = await apiFetch(API_BASE, {
+    const res = await fetch(API_BASE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, store, data }),
@@ -76,7 +75,7 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
 
 async function serverGetAll(username: string): Promise<Record<string, any> | null> {
   try {
-    const res = await apiFetch(`${API_BASE}?username=${encodeURIComponent(username)}`, {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}`, {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return null;
@@ -89,7 +88,7 @@ async function serverGetAll(username: string): Promise<Record<string, any> | nul
 
 async function serverDelete(username: string, store: string): Promise<boolean> {
   try {
-    const res = await apiFetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
+    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
       method: 'DELETE',
       signal: AbortSignal.timeout(5000),
     });
@@ -101,7 +100,7 @@ async function serverDelete(username: string, store: string): Promise<boolean> {
 
 async function serverSetAll(username: string, stores: Record<string, any>): Promise<boolean> {
   try {
-    const res = await apiFetch(API_BASE, {
+    const res = await fetch(API_BASE, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, stores }),

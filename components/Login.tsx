@@ -1,16 +1,15 @@
 import React, { useState } from 'react';
 import { User } from '../types.ts';
 import { Logo } from './Logo.tsx';
-import { login as apiLogin } from '../services/session.ts';
 
 interface LoginProps {
   onLogin: (user: User) => void;
 }
 
-const DISPLAY_OVERRIDES: Record<string, { displayName: string; role: string }> = {
-  ironman1111: { displayName: 'Iron Command', role: 'Chief Engineer' },
-  batbout: { displayName: 'Logistics Hub', role: 'Logistics Specialist' },
-};
+const USERS = [
+  { username: 'ironman1111', password: 'YaKareem1121@', displayName: 'Iron Command', role: 'Chief Engineer' },
+  { username: 'batbout', password: 'batto123', displayName: 'Logistics Hub', role: 'Logistics Specialist' }
+];
 
 export const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [username, setUsername] = useState('');
@@ -18,27 +17,29 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
-    try {
-      const session = await apiLogin(username.trim(), password);
-      const overrides = DISPLAY_OVERRIDES[session.username] || { displayName: session.username, role: session.role };
-      onLogin({
-        username: session.username,
-        displayName: overrides.displayName,
-        role: overrides.role,
-      });
-    } catch (err: any) {
-      setError((err?.message || 'UNAUTHORIZED: INVALID ACCESS CREDENTIALS').toUpperCase());
-    } finally {
-      setLoading(false);
-    }
+
+    setTimeout(() => {
+      const found = USERS.find(u => u.username === username && u.password === password);
+      if (found) {
+        onLogin({
+          username: found.username,
+          displayName: found.displayName,
+          role: found.role
+        });
+      } else {
+        setError('UNAUTHORIZED: INVALID ACCESS CREDENTIALS');
+        setLoading(false);
+      }
+    }, 1000);
   };
 
   return (
     <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 relative overflow-hidden font-sans">
+      {/* Industrial Background Elements */}
       <div className="absolute inset-0 opacity-20 pointer-events-none">
         <div className="absolute inset-0" style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, #ffcd00 1px, transparent 0)', backgroundSize: '40px 40px' }}></div>
         <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-cat-black via-transparent to-cat-black"></div>
@@ -62,19 +63,18 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
         <div className="bg-white/5 backdrop-blur-2xl p-12 rounded-[3rem] border border-white/10 shadow-[0_32px_64px_-16px_rgba(0,0,0,0.8)] relative overflow-hidden group">
           <div className="absolute top-0 left-0 w-full h-1.5 bg-cat-yellow shadow-[0_0_20px_rgba(255,205,0,0.5)]"></div>
-
+          
           <form onSubmit={handleSubmit} className="space-y-8">
             <div className="space-y-2.5">
               <label className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 ml-4">Operator Identity</label>
               <div className="relative">
-                <input
-                  type="text"
+                <input 
+                  type="text" 
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full bg-white/5 border border-white/10 rounded-[1.5rem] p-6 text-white font-bold text-base focus:bg-white/10 focus:border-cat-yellow outline-none transition-all placeholder:text-slate-700 pl-16 shadow-inner"
                   placeholder="USERNAME"
                   required
-                  autoComplete="username"
                 />
                 <div className="absolute left-6 top-1/2 -translate-y-1/2 text-cat-yellow opacity-40">
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
@@ -85,14 +85,13 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
             <div className="space-y-2.5">
               <label className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 ml-4">Security Protocol</label>
               <div className="relative">
-                <input
-                  type="password"
+                <input 
+                  type="password" 
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full bg-white/5 border border-white/10 rounded-[1.5rem] p-6 text-white font-bold text-base focus:bg-white/10 focus:border-cat-yellow outline-none transition-all placeholder:text-slate-700 pl-16 shadow-inner"
                   placeholder="PASSWORD"
                   required
-                  autoComplete="current-password"
                 />
                 <div className="absolute left-6 top-1/2 -translate-y-1/2 text-cat-yellow opacity-40">
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
@@ -109,8 +108,8 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
               </div>
             )}
 
-            <button
-              type="submit"
+            <button 
+              type="submit" 
               disabled={loading}
               className={`w-full py-8 rounded-[1.5rem] font-black text-xl uppercase tracking-[0.4em] flex items-center justify-center gap-6 transition-all shadow-2xl relative overflow-hidden group ${loading ? 'bg-cat-yellow/20 text-cat-yellow/40 cursor-not-allowed' : 'bg-cat-yellow text-cat-black hover:bg-white active:scale-[0.98]'}`}
             >
@@ -139,7 +138,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
             </div>
           </div>
         </div>
-
+        
         <p className="text-center mt-10 text-[11px] text-slate-600 font-black uppercase tracking-[0.4em]">© 2024 American Iron LLC • Industrial Grade Logistics</p>
       </div>
     </div>
