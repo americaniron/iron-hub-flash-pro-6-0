@@ -347,7 +347,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ invoices, quotes, accounts
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-xs font-black text-slate-900">${inv.total.toLocaleString()}</p>
+                    <p className="text-xs font-black text-slate-900">${(inv.total ?? 0).toLocaleString()}</p>
                   </div>
                 </div>
               ))}

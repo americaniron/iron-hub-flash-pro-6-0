@@ -261,7 +261,7 @@ const Dashboard: React.FC<{
                                 <p className="font-black text-amber-900 uppercase tracking-tight">{getAccountById(inv.clientId)?.company}</p>
                                 <p className="text-amber-600 font-mono text-[10px] mt-0.5">{inv.id} &bull; Due: {inv.dueDate}</p>
                             </div>
-                            <p className="font-mono font-black text-amber-900">${inv.total.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                            <p className="font-mono font-black text-amber-900">${(inv.total ?? 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
                         </div>
                     )) : <p className="text-center text-xs text-slate-400 py-16 font-bold uppercase tracking-widest">No overdue invoices. System nominal.</p>}
                 </div>

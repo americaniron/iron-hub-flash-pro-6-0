@@ -667,7 +667,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className="text-sm font-mono font-black text-slate-600 group-hover:text-cat-black transition-colors">${q.total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                  <span className="text-sm font-mono font-black text-slate-600 group-hover:text-cat-black transition-colors">${(q.total ?? 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
                 </div>
               </div>
             ))
