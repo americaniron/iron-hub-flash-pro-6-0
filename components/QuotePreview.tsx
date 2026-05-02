@@ -275,7 +275,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Rule 1: Define page layout and guarantee margins. */
           @page {
             size: LETTER;
-            margin: 0 0.5in 0.5in 0.5in !important;
+            margin: 0 0.5in 0.85in 0.5in !important; /* extra bottom for fixed footer */
           }
 
           /* Rule 2: Reset and prepare the document body for printing. */
@@ -302,7 +302,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           }
 
           .no-print { display: none !important; }
-          .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.6in; }
+          .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.85in !important; }
 
           /* Rule 3: Enforce a rigid, non-breaking table structure for line items. */
           table {
@@ -313,7 +313,10 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
             margin-bottom: 15pt !important; /* Increased spacing */
           }
           thead { display: table-header-group !important; }
-          tr { page-break-inside: avoid !important; }
+          tfoot { display: table-footer-group !important; }
+          tr { page-break-inside: avoid !important; break-inside: avoid !important; }
+          /* Keep section headers attached to following content */
+          h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
           th, td {
             padding: 8pt !important; /* Unified and increased padding */
             border-bottom: 1pt solid #dee2e6 !important; /* Sharper border color */
@@ -379,12 +382,12 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           .line-item-notes { font-size: 7.5pt !important; }
 
           /* Rule 5: Stabilize layout of summary blocks to prevent page-break issues. */
-          .ai-analysis-box, .terms-box, .terms-box p, .summary-table tr, .totals-container {
+          .ai-analysis-box, .terms-box, .terms-box p, .summary-table, .summary-table tr, .totals-container, .address-block {
             page-break-inside: avoid !important;
             break-inside: avoid !important;
             page-break-before: auto !important;
           }
-          
+
           .totals-container {
             display: flex !important;
             flex-direction: row !important;
@@ -392,6 +395,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
             gap: 20pt !important;
             margin-top: 20pt !important;
             width: 100% !important;
+            break-before: avoid !important; /* don't sit alone at top of new page */
           }
           .ai-analysis-box {
              background: #f8f9fa !important;

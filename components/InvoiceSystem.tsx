@@ -381,7 +381,7 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
 
             @media print {
                 /* == INSTITUTIONAL GRADE PRODUCTION PRINT STYLESHEET V6 == */
-                @page { size: LETTER; margin: 0.5in !important; }
+                @page { size: LETTER; margin: 0.5in 0.5in 0.85in 0.5in !important; }
                 *, *::before, *::after { box-sizing: border-box !important; }
                 html, body {
                     width: 100% !important; height: auto !important; margin: 0 !important; padding: 0 !important;
@@ -390,13 +390,22 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                     font-size: 10pt !important; line-height: 1.5 !important;
                 }
                 .no-print { display: none !important; }
-                .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.6in; }
-                
+                /* Reserve enough room at the bottom of every page for the fixed footer + warranty block */
+                .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.85in !important; }
+
                 .invoice-document {
                     box-shadow: none !important; border: none !important; width: 100% !important;
                     border-radius: 0 !important; border-top: 8pt solid #ffcd00 !important;
                     position: relative; color: black !important;
                 }
+
+                /* Repeat table headers on every page; never split a row mid-cell */
+                table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
+                thead { display: table-header-group !important; }
+                tfoot { display: table-footer-group !important; }
+                tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
+                /* Keep section headers attached to following content */
+                h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
 
                 .print-footer {
                     display: block !important;
@@ -408,6 +417,7 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                     font-size: 8pt !important;
                     color: #6c757d !important;
                     page-break-inside: avoid !important;
+                    break-inside: avoid !important;
                 }
                 .print-footer p {
                     margin: 0;
@@ -418,11 +428,22 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                     flex-direction: row !important;
                     justify-content: space-between !important;
                     align-items: flex-start !important;
+                    break-inside: avoid !important;
+                    page-break-inside: avoid !important;
+                    break-before: avoid !important;
                 }
-                .summary-table { width: 100% !important; }
-                .terms-box { margin-top: 0 !important; }
+                .summary-table { width: 100% !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+                .terms-box { margin-top: 0 !important; break-inside: avoid !important; page-break-inside: avoid !important; }
                 .line-item-desc { font-size: 8pt !important; }
-                .address-block { background: transparent !important; border: 1px solid #eee !important; }
+                .address-block {
+                    background: transparent !important;
+                    border: 1px solid #eee !important;
+                    break-inside: avoid !important;
+                    page-break-inside: avoid !important;
+                }
+                /* Force flex on the on-screen Tailwind grid so Bill-To / Commercial blocks line up */
+                .grid.grid-cols-2 { display: flex !important; flex-direction: row !important; gap: 0.25in !important; }
+                .grid.grid-cols-2 > * { flex: 1 !important; }
                 .invoice-print-footer {
                   display: block !important;
                   margin-top: 0.4in;
@@ -432,7 +453,13 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                   text-align: justify;
                   border-top: 1px solid #eee;
                   padding-top: 0.1in;
+                  break-inside: avoid !important;
+                  page-break-inside: avoid !important;
                 }
+                /* Crisp print rendering */
+                body, body * { -webkit-font-smoothing: antialiased !important; text-rendering: geometricPrecision !important; }
+                .tracking-widest { letter-spacing: 0.08em !important; }
+                .tracking-tighter { letter-spacing: -0.01em !important; }
             }
           `}</style>
           <div className="flex justify-between items-end no-print">

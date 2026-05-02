@@ -16,26 +16,36 @@ export const PaymentReceipt: React.FC<PaymentReceiptProps> = ({ payment, account
       <style>{`
         .print-footer { display: none; }
         @media print {
-          @page { size: LETTER; margin: 0.5in; }
+          @page { size: LETTER; margin: 0.5in 0.5in 0.85in 0.5in; }
           body * { visibility: hidden; }
           .printable-receipt, .printable-receipt * { visibility: visible; }
-          .printable-receipt { 
-              position: absolute; 
-              left: 0; 
-              top: 0; 
+          .print-footer, .print-footer * { visibility: visible; }
+          .printable-receipt {
+              position: absolute;
+              left: 0;
+              top: 0;
               width: 100%;
               margin: 0;
               padding: 0.5in;
               border: none;
               box-shadow: none;
               font-size: 10pt;
-              padding-bottom: 0.6in;
+              padding-bottom: 0.85in !important;
           }
-           .receipt-header h2 {
+          .receipt-header { break-inside: avoid !important; page-break-inside: avoid !important; }
+          .receipt-header h2 {
              font-size: 22pt !important;
              color: #000 !important;
-           }
-           .print-footer {
+          }
+          /* Repeat headers, never split rows */
+          table { width: 100% !important; border-collapse: collapse !important; }
+          thead { display: table-header-group !important; }
+          tfoot { display: table-footer-group !important; }
+          tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
+          /* Receipts are short — protect the summary block too */
+          .grid.grid-cols-2 { display: flex !important; flex-direction: row !important; gap: 0.25in !important; }
+          .grid.grid-cols-2 > * { flex: 1 !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+          .print-footer {
             display: block !important;
             position: fixed;
             bottom: 0.25in;
@@ -44,6 +54,8 @@ export const PaymentReceipt: React.FC<PaymentReceiptProps> = ({ payment, account
             text-align: center;
             font-size: 8pt !important;
             color: #6c757d !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
           }
           .print-footer p {
             margin: 0;

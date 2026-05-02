@@ -84,13 +84,28 @@
                 left: 0;
                 top: 0;
                 width: 100%;
+                padding-bottom: 0.85in !important; /* reserve room for the fixed .print-footer on every page */
             }
-            @page { size: LETTER; margin: 0.5in; }
-            html, body { background: white !important; margin: 0 !important; padding: 0 !important; background-image: none !important; }
+            .print-footer, .print-footer * { visibility: visible; }
+            @page { size: LETTER; margin: 0.5in 0.5in 0.85in 0.5in; }
+            html, body { background: white !important; margin: 0 !important; padding: 0 !important; background-image: none !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             .no-print { display: none !important; }
             table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
-            tr { page-break-inside: avoid !important; }
+            tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
             thead { display: table-header-group !important; }
+            tfoot { display: table-footer-group !important; }
+            /* Keep address blocks, totals, terms, and warranty disclaimers from splitting */
+            .address-block, .totals-container, .totals-container-print, .terms-box, .summary-table,
+            .invoice-print-footer, .receipt-header, .ai-analysis-box {
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+            }
+            /* Keep section headers attached to the content that follows */
+            h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
+            /* Crisp print rendering */
+            body, body * { -webkit-font-smoothing: antialiased !important; text-rendering: geometricPrecision !important; }
+            .tracking-widest { letter-spacing: 0.08em !important; }
+            .tracking-tighter { letter-spacing: -0.01em !important; }
         }
 
         /* PDF Generation Mode (simulates print styles for html2pdf globally) */
@@ -121,6 +136,32 @@
         .pdf-generation-mode .print-header { margin-bottom: 24px !important; }
         .pdf-generation-mode .address-block { padding: 12px !important; border-radius: 8px !important; }
         .pdf-generation-mode .part-img-container { width: 60px !important; height: 60px !important; }
+        /* Page-break hints for html2pdf.js (which uses pagebreak.mode='css') —
+           @media print is NOT active during html2canvas capture, so these rules
+           must be present outside the print block to take effect on PDFs. */
+        .pdf-generation-mode .address-block,
+        .pdf-generation-mode .totals-container,
+        .pdf-generation-mode .totals-container-print,
+        .pdf-generation-mode .terms-box,
+        .pdf-generation-mode .summary-table,
+        .pdf-generation-mode .invoice-print-footer,
+        .pdf-generation-mode .receipt-header,
+        .pdf-generation-mode .ai-analysis-box,
+        .pdf-generation-mode tr,
+        .pdf-generation-mode td,
+        .pdf-generation-mode th {
+          break-inside: avoid !important;
+          page-break-inside: avoid !important;
+        }
+        .pdf-generation-mode thead { display: table-header-group !important; }
+        .pdf-generation-mode tfoot { display: table-footer-group !important; }
+        .pdf-generation-mode h1,
+        .pdf-generation-mode h2,
+        .pdf-generation-mode h3,
+        .pdf-generation-mode .section-header {
+          break-after: avoid !important;
+          page-break-after: avoid !important;
+        }
 
         /* Tactile Button Interactions */
         .btn-app {
