@@ -31,6 +31,17 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     }
     }, [isOpen, client.email, invoice]);
 
+  // Auto-attach the PDF on open so the user doesn't have to remember to click "Attach PDF"
+  useEffect(() => {
+    if (isOpen && generatePdf) {
+      // Defer one tick so the modal mounts before html2canvas captures the document underneath
+      const t = setTimeout(() => { void handleAttachPdf(); }, 150);
+      return () => clearTimeout(t);
+    }
+    // We intentionally only auto-attach on open transitions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   useEffect(() => {
     if (consoleRef.current) {
         consoleRef.current.scrollTop = consoleRef.current.scrollHeight;

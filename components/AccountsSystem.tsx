@@ -4,6 +4,7 @@ import { User, CustomerAccount, InvoiceData, Payment, SavedQuote } from '../type
 import { PaymentReceipt } from './PaymentReceipt.tsx';
 import { exportContacts } from '../services/exportService.ts';
 import { Download, FileSpreadsheet, FileText, RefreshCw } from 'lucide-react';
+import html2pdf from 'html2pdf.js';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -109,6 +110,8 @@ const PaymentReceiptModal: React.FC<{
   invoice?: InvoiceData;
   onClose: () => void;
 }> = ({ payment, account, invoice, onClose }) => {
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
 
   const handlePrint = () => {
     try {
@@ -122,19 +125,74 @@ const PaymentReceiptModal: React.FC<{
     }
   };
 
-  const handleEmail = () => {
+  const generateReceiptPdf = async (): Promise<string | null> => {
+    const element = document.querySelector('.printable-receipt') as HTMLElement | null;
+    if (!element) return null;
+    element.classList.add('pdf-generation-mode');
+    document.body.classList.add('pdf-generation-mode-active');
+    const opt = {
+      margin: [0.25, 0.5, 0.85, 0.5],
+      filename: `Receipt-${payment.id}.pdf`,
+      image: { type: 'jpeg' as const, quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' as const },
+      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] as const, avoid: ['tr', '.receipt-header', '.summary-table'] },
+    };
+    try {
+      return await html2pdf().from(element).set(opt).outputPdf('datauristring');
+    } catch (err) {
+      console.error('Receipt PDF generation failed', err);
+      return null;
+    } finally {
+      element.classList.remove('pdf-generation-mode');
+      document.body.classList.remove('pdf-generation-mode-active');
+    }
+  };
+
+  const downloadReceiptFallback = async () => {
+    const dataUri = await generateReceiptPdf();
+    if (!dataUri) return;
+    const a = document.createElement('a');
+    a.href = dataUri;
+    a.download = `Receipt-${payment.id}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const handleEmail = async () => {
+    if (isSendingEmail) return;
+    if (!account.email) {
+      setEmailStatus({ kind: 'err', msg: 'No email on file for this account' });
+      return;
+    }
+    setIsSendingEmail(true);
+    setEmailStatus(null);
     const subject = `Payment Receipt from American Iron LLC (Ref: ${payment.id})`;
-    const body = `Dear ${account.contactName || account.company},
-
-Thank you for your payment of $${payment.amount.toFixed(2)} received on ${payment.date}.
-This payment has been applied to Invoice #${payment.invoiceId}.
-
-We appreciate your business.
-
-Sincerely,
-The American Iron Team`;
-
-    window.location.href = `mailto:${account.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const body = `Dear ${account.contactName || account.company},\n\nThank you for your payment of $${payment.amount.toFixed(2)} received on ${payment.date}.\nThis payment has been applied to Invoice #${payment.invoiceId}.\n\nThe receipt is attached as a PDF.\n\nWe appreciate your business.\n\nSincerely,\nThe American Iron Team`;
+    try {
+      const dataUri = await generateReceiptPdf();
+      if (!dataUri) throw new Error('Failed to render receipt PDF');
+      const res = await fetch('/api/send-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: account.email,
+          subject,
+          body,
+          attachments: [{ filename: `Receipt-${payment.id}.pdf`, path: dataUri }],
+        }),
+      });
+      const result = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(result.details || result.error || `HTTP ${res.status}`);
+      setEmailStatus({ kind: 'ok', msg: `Sent to ${account.email}` });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setEmailStatus({ kind: 'err', msg: `Send failed — ${msg}. Downloading PDF instead.` });
+      await downloadReceiptFallback();
+    } finally {
+      setIsSendingEmail(false);
+    }
   };
 
   return (
@@ -142,8 +200,15 @@ The American Iron Team`;
       <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[95vh]">
         <div className="p-6 border-b flex justify-between items-center bg-slate-50">
             <h3 className="text-lg font-black uppercase tracking-wider text-slate-800">Payment Receipt</h3>
-            <div className="flex gap-2">
-                <button onClick={handleEmail} className="px-5 py-2.5 bg-cat-yellow text-cat-black text-[10px] font-bold uppercase rounded-lg btn-app">Email Receipt</button>
+            <div className="flex gap-2 items-center">
+                {emailStatus && (
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-lg ${emailStatus.kind === 'ok' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                    {emailStatus.msg}
+                  </span>
+                )}
+                <button onClick={handleEmail} disabled={isSendingEmail} className="px-5 py-2.5 bg-cat-yellow text-cat-black text-[10px] font-bold uppercase rounded-lg btn-app disabled:opacity-50 disabled:cursor-wait">
+                  {isSendingEmail ? 'Sending…' : 'Email Receipt'}
+                </button>
                 <button onClick={handlePrint} className="px-5 py-2.5 bg-cat-black text-white text-[10px] font-bold uppercase rounded-lg btn-app">Print / Save PDF</button>
                 <button onClick={onClose} className="p-2.5 bg-slate-200 text-slate-600 rounded-lg btn-app">✕</button>
             </div>
