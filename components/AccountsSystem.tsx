@@ -446,40 +446,15 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
     const [syncMessage, setSyncMessage] = useState<{type: 'success' | 'error', text: string} | null>(null);
     
     const handleSyncCRM = async () => {
+        // TODO: re-wire to authenticated POST /api/crm/sync once Round 3 auth lands.
+        // Previously POSTed full account list (PII) to https://iron-hub-suite.replit.app/api/sync
+        // with no authentication and a wide-open CORS policy. Removed in C-4.
         setIsSyncing(true);
-        setSyncMessage(null);
-        try {
-            // Attempt to sync with Iron Hub CRM API
-            const response = await fetch('https://iron-hub-suite.replit.app/api/sync', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ accounts }),
-            }).catch(() => null); // Catch network errors
-
-            if (response && response.ok) {
-                const data = await response.json();
-                if (data && Array.isArray(data.accounts)) {
-                    // Pull updates from CRM to local database
-                    await onSaveAccounts(data.accounts);
-                    setSyncMessage({ type: 'success', text: "Successfully synced with Iron Hub CRM via API! Customer data is up to date." });
-                } else {
-                    setSyncMessage({ type: 'success', text: "Successfully synced with Iron Hub CRM via API! No updates received." });
-                }
-            } else {
-                // Fallback to simulated sync if API is not available
-                console.warn("Iron Hub CRM API not available. Simulating sync...");
-                await new Promise(resolve => setTimeout(resolve, 1500));
-                setSyncMessage({ type: 'error', text: "Iron Hub CRM API is currently unreachable. Please use the Import/Export tools to manually sync data with the CRM." });
-            }
-        } catch (error) {
-            console.error("CRM Sync failed:", error);
-            setSyncMessage({ type: 'error', text: "Failed to sync with Iron Hub CRM. Please check your connection." });
-        } finally {
+        setSyncMessage({ type: 'error', text: 'CRM sync is temporarily unavailable while authentication is being upgraded. Use Import/Export for now.' });
+        setTimeout(() => {
             setIsSyncing(false);
-            setTimeout(() => setSyncMessage(null), 5000);
-        }
+            setSyncMessage(null);
+        }, 4000);
     };
 
     const selectedAccount = useMemo(() => {
