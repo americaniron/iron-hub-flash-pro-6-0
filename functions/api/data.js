@@ -1,264 +1,73 @@
 // ---------------------------------------------------------------------------
 // Cloudflare Pages Function — /api/data
-// Server-side persistent data storage using Cloudflare D1 (SQLite)
-// Supports chunked storage for large data (inventory, quotes, etc.)
-// D1 binding name: DB (configured in Cloudflare Pages dashboard)
+// Server-side persistent data storage using Cloudflare D1 (SQLite).
+//
+// Round 3 (C-1/C-2/C-6): authenticated. Sessions are issued by /api/auth/login
+// and presented as `Authorization: Bearer <hex64>`. The session's username is
+// the only username this endpoint will read or write — the `?username=` /
+// body.username field is now ignored (kept in the URL surface so old clients
+// don't 400, but cross-user access is impossible).
 // ---------------------------------------------------------------------------
 
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+import { resolveSession, corsForOrigin, jsonResponse, unauthorized } from './_auth.js';
 
 const VALID_STORES = [
   'accounts', 'quotes', 'invoices', 'payments', 'credits',
   'drafts', 'recurring_invoices', 'templates', 'parts_image_pool', 'inventory'
 ];
 
-// D1 has a ~1MB row limit; we chunk at 800KB to be safe
-const CHUNK_SIZE = 800_000;
+const CHUNK_SIZE = 800_000; // ~1MB D1 row limit, with headroom
 
-// Handle CORS preflight
-export async function onRequestOptions() {
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
+export async function onRequestOptions({ request }) {
+  return new Response(null, { status: 204, headers: corsForOrigin(request) });
 }
 
-// ---- Chunking helpers ----
-
-// Read a store, reassembling chunks if they exist
 async function readStore(DB, username, store) {
-  // First try the main row (non-chunked)
   const row = await DB.prepare(
     'SELECT data FROM user_data WHERE username = ? AND store_name = ?'
   ).bind(username, store).first();
+  if (row) return JSON.parse(row.data);
 
-  if (row) {
-    return JSON.parse(row.data);
-  }
-
-  // Check for chunked data
   const chunks = await DB.prepare(
-    `SELECT store_name, data FROM user_data
-     WHERE username = ? AND store_name LIKE ?
-     ORDER BY store_name ASC`
+    'SELECT store_name, data FROM user_data WHERE username = ? AND store_name LIKE ? ORDER BY store_name ASC'
   ).bind(username, `${store}__chunk_%`).all();
-
-  if (chunks && chunks.results && chunks.results.length > 0) {
-    // Reassemble chunks
+  if (chunks?.results?.length) {
     let combined = '';
-    for (const chunk of chunks.results) {
-      combined += chunk.data;
-    }
+    for (const c of chunks.results) combined += c.data;
     return JSON.parse(combined);
   }
-
-  return null; // No data found
+  return null;
 }
 
-// Write a store, chunking if necessary
 async function writeStore(DB, username, store, data) {
-  const jsonData = JSON.stringify(data);
-
-  // First, delete any existing chunks AND the main row for this store
+  const json = JSON.stringify(data);
   await DB.prepare(
-    `DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)`
+    'DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)'
   ).bind(username, store, `${store}__chunk_%`).run();
 
-  if (jsonData.length <= CHUNK_SIZE) {
-    // Fits in a single row
+  if (json.length <= CHUNK_SIZE) {
     await DB.prepare(
-      `INSERT INTO user_data (username, store_name, data, updated_at)
-       VALUES (?, ?, ?, datetime('now'))`
-    ).bind(username, store, jsonData).run();
-  } else {
-    // Split into chunks
-    const statements = [];
-    let chunkIndex = 0;
-    for (let offset = 0; offset < jsonData.length; offset += CHUNK_SIZE) {
-      const chunkData = jsonData.substring(offset, offset + CHUNK_SIZE);
-      const chunkName = `${store}__chunk_${String(chunkIndex).padStart(4, '0')}`;
-      statements.push(
-        DB.prepare(
-          `INSERT INTO user_data (username, store_name, data, updated_at)
-           VALUES (?, ?, ?, datetime('now'))`
-        ).bind(username, chunkName, chunkData)
-      );
-      chunkIndex++;
-    }
-    if (statements.length > 0) {
-      await DB.batch(statements);
-    }
-    console.log(`[data.js] Stored '${store}' for ${username} in ${chunkIndex} chunks (~${(jsonData.length / 1024).toFixed(0)}KB)`);
+      "INSERT INTO user_data (username, store_name, data, updated_at) VALUES (?, ?, ?, datetime('now'))"
+    ).bind(username, store, json).run();
+    return;
   }
+  const stmts = [];
+  let idx = 0;
+  for (let off = 0; off < json.length; off += CHUNK_SIZE) {
+    const chunkData = json.substring(off, off + CHUNK_SIZE);
+    const chunkName = `${store}__chunk_${String(idx).padStart(4, '0')}`;
+    stmts.push(DB.prepare(
+      "INSERT INTO user_data (username, store_name, data, updated_at) VALUES (?, ?, ?, datetime('now'))"
+    ).bind(username, chunkName, chunkData));
+    idx++;
+  }
+  if (stmts.length) await DB.batch(stmts);
 }
 
-// Delete a store including any chunks
 async function deleteStore(DB, username, store) {
   await DB.prepare(
-    `DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)`
+    'DELETE FROM user_data WHERE username = ? AND (store_name = ? OR store_name LIKE ?)'
   ).bind(username, store, `${store}__chunk_%`).run();
-}
-
-
-// GET /api/data?username=xxx&store=yyy  — Read data for a user+store
-export async function onRequestGet(context) {
-  const { env } = context;
-  const url = new URL(context.request.url);
-  const username = url.searchParams.get('username');
-  const store = url.searchParams.get('store');
-
-  if (!username) {
-    return Response.json({ error: 'Missing username parameter' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  const DB = env.DB;
-  if (!DB) {
-    return Response.json({ error: 'D1 database not bound. Please configure DB binding in Cloudflare Pages settings.' }, { status: 500, headers: CORS_HEADERS });
-  }
-
-  try {
-    // If store is specified, return just that store's data
-    if (store) {
-      if (!VALID_STORES.includes(store)) {
-        return Response.json({ error: `Invalid store: ${store}` }, { status: 400, headers: CORS_HEADERS });
-      }
-
-      const data = await readStore(DB, username, store);
-      return Response.json({ success: true, data: data !== null ? data : getDefaultForStore(store) }, { headers: CORS_HEADERS });
-    }
-
-    // No store specified — return ALL stores for this user (bulk export)
-    const result = {};
-    for (const s of VALID_STORES) {
-      result[s] = getDefaultForStore(s);
-    }
-
-    // Read all stores (including chunked ones)
-    for (const s of VALID_STORES) {
-      const data = await readStore(DB, username, s);
-      if (data !== null) {
-        result[s] = data;
-      }
-    }
-
-    return Response.json({ success: true, data: result }, { headers: CORS_HEADERS });
-
-  } catch (err) {
-    console.error('D1 read error:', err);
-    return Response.json({ error: 'Database read failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
-  }
-}
-
-// POST /api/data  — Write data for a user+store (auto-chunks if needed)
-// Body: { username, store, data }
-export async function onRequestPost(context) {
-  const { env, request } = context;
-
-  const DB = env.DB;
-  if (!DB) {
-    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
-  }
-
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  const { username, store, data } = body;
-
-  if (!username || !store) {
-    return Response.json({ error: 'Missing username or store' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  if (!VALID_STORES.includes(store)) {
-    return Response.json({ error: `Invalid store: ${store}` }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  try {
-    await writeStore(DB, username, store, data);
-    return Response.json({ success: true }, { headers: CORS_HEADERS });
-  } catch (err) {
-    console.error('D1 write error:', err);
-    return Response.json({ error: 'Database write failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
-  }
-}
-
-// PUT /api/data  — Bulk import all stores for a user
-// Body: { username, stores: { accounts: [...], quotes: [...], ... } }
-export async function onRequestPut(context) {
-  const { env, request } = context;
-
-  const DB = env.DB;
-  if (!DB) {
-    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
-  }
-
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  const { username, stores } = body;
-
-  if (!username || !stores) {
-    return Response.json({ error: 'Missing username or stores' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  try {
-    let storesWritten = 0;
-    for (const [storeName, data] of Object.entries(stores)) {
-      if (VALID_STORES.includes(storeName)) {
-        await writeStore(DB, username, storeName, data);
-        storesWritten++;
-      }
-    }
-
-    return Response.json({ success: true, storesWritten }, { headers: CORS_HEADERS });
-
-  } catch (err) {
-    console.error('D1 bulk write error:', err);
-    return Response.json({ error: 'Bulk write failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
-  }
-}
-
-// DELETE /api/data?username=xxx&store=yyy  — Delete a specific store for a user
-export async function onRequestDelete(context) {
-  const { env } = context;
-  const url = new URL(context.request.url);
-  const username = url.searchParams.get('username');
-  const store = url.searchParams.get('store');
-
-  if (!username) {
-    return Response.json({ error: 'Missing username' }, { status: 400, headers: CORS_HEADERS });
-  }
-
-  const DB = env.DB;
-  if (!DB) {
-    return Response.json({ error: 'D1 database not bound.' }, { status: 500, headers: CORS_HEADERS });
-  }
-
-  try {
-    if (store) {
-      await deleteStore(DB, username, store);
-    } else {
-      // Delete ALL stores for this user (including chunks)
-      await DB.prepare(
-        'DELETE FROM user_data WHERE username = ?'
-      ).bind(username).run();
-    }
-
-    return Response.json({ success: true }, { headers: CORS_HEADERS });
-
-  } catch (err) {
-    console.error('D1 delete error:', err);
-    return Response.json({ error: 'Delete failed', details: err.message }, { status: 500, headers: CORS_HEADERS });
-  }
 }
 
 function getDefaultForStore(storeName) {
@@ -266,4 +75,109 @@ function getDefaultForStore(storeName) {
   if (storeName === 'drafts') return null;
   if (storeName === 'parts_image_pool') return {};
   return [];
+}
+
+async function requireAuth(request, env) {
+  const session = await resolveSession(request, env);
+  if (!session) return null;
+  return session;
+}
+
+export async function onRequestGet({ request, env }) {
+  const session = await requireAuth(request, env);
+  if (!session) return unauthorized(request);
+  const username = session.username; // session-bound, NOT from query
+  const url = new URL(request.url);
+  const store = url.searchParams.get('store');
+  if (!env.DB) return jsonResponse(request, { error: 'DB binding missing' }, 500);
+
+  try {
+    if (store) {
+      if (!VALID_STORES.includes(store)) {
+        return jsonResponse(request, { error: `Invalid store: ${store}` }, 400);
+      }
+      const data = await readStore(env.DB, username, store);
+      return jsonResponse(request, { success: true, data: data !== null ? data : getDefaultForStore(store) });
+    }
+    const result = {};
+    for (const s of VALID_STORES) result[s] = getDefaultForStore(s);
+    for (const s of VALID_STORES) {
+      const data = await readStore(env.DB, username, s);
+      if (data !== null) result[s] = data;
+    }
+    return jsonResponse(request, { success: true, data: result });
+  } catch (err) {
+    return jsonResponse(request, { error: 'Database read failed', details: err.message }, 500);
+  }
+}
+
+export async function onRequestPost({ request, env }) {
+  const session = await requireAuth(request, env);
+  if (!session) return unauthorized(request);
+  const username = session.username;
+  if (!env.DB) return jsonResponse(request, { error: 'DB binding missing' }, 500);
+
+  let body;
+  try { body = await request.json(); }
+  catch { return jsonResponse(request, { error: 'Invalid JSON body' }, 400); }
+
+  const { store, data } = body;
+  if (!store) return jsonResponse(request, { error: 'Missing store' }, 400);
+  if (!VALID_STORES.includes(store)) return jsonResponse(request, { error: `Invalid store: ${store}` }, 400);
+
+  try {
+    await writeStore(env.DB, username, store, data);
+    return jsonResponse(request, { success: true });
+  } catch (err) {
+    return jsonResponse(request, { error: 'Database write failed', details: err.message }, 500);
+  }
+}
+
+export async function onRequestPut({ request, env }) {
+  const session = await requireAuth(request, env);
+  if (!session) return unauthorized(request);
+  const username = session.username;
+  if (!env.DB) return jsonResponse(request, { error: 'DB binding missing' }, 500);
+
+  let body;
+  try { body = await request.json(); }
+  catch { return jsonResponse(request, { error: 'Invalid JSON body' }, 400); }
+
+  const { stores } = body;
+  if (!stores || typeof stores !== 'object') {
+    return jsonResponse(request, { error: 'Missing stores' }, 400);
+  }
+
+  try {
+    let storesWritten = 0;
+    for (const [storeName, data] of Object.entries(stores)) {
+      if (VALID_STORES.includes(storeName)) {
+        await writeStore(env.DB, username, storeName, data);
+        storesWritten++;
+      }
+    }
+    return jsonResponse(request, { success: true, storesWritten });
+  } catch (err) {
+    return jsonResponse(request, { error: 'Bulk write failed', details: err.message }, 500);
+  }
+}
+
+export async function onRequestDelete({ request, env }) {
+  const session = await requireAuth(request, env);
+  if (!session) return unauthorized(request);
+  const username = session.username;
+  if (!env.DB) return jsonResponse(request, { error: 'DB binding missing' }, 500);
+  const url = new URL(request.url);
+  const store = url.searchParams.get('store');
+
+  try {
+    if (store) {
+      await deleteStore(env.DB, username, store);
+    } else {
+      await env.DB.prepare('DELETE FROM user_data WHERE username = ?').bind(username).run();
+    }
+    return jsonResponse(request, { success: true });
+  } catch (err) {
+    return jsonResponse(request, { error: 'Delete failed', details: err.message }, 500);
+  }
 }

@@ -12,6 +12,7 @@ import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { Login } from './components/Login.tsx';
 import { activityBridge } from './services/activityBridge.ts';
+import { readSession, clearSession, logout as serverLogout, setUnauthorizedHandler } from './services/session.ts';
 import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
 import html2pdf from 'html2pdf.js';
 
@@ -28,7 +29,14 @@ const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
   </div>
 );
 
-// Persistent login: remembers the logged-in user across sessions via localStorage
+// Persistent login: server-issued bearer session in localStorage under 'ih_session'.
+// The legacy 'iron_hub_user' cookie/blob (no token, just a username) was used to
+// authorize access to /api/data — replaced in Round 3.
+const DISPLAY_OVERRIDES: Record<string, { displayName: string; role: string }> = {
+  ironman1111: { displayName: 'Iron Command', role: 'Chief Engineer' },
+  batbout: { displayName: 'Logistics Hub', role: 'Logistics Specialist' },
+};
+
 const useAuthenticatedUser = (): {
   user: User | null;
   login: (user: User) => void;
@@ -37,24 +45,26 @@ const useAuthenticatedUser = (): {
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    // Restore session from localStorage
-    const saved = localStorage.getItem('iron_hub_user');
-    if (saved) {
-      try {
-        setUser(JSON.parse(saved));
-      } catch {
-        localStorage.removeItem('iron_hub_user');
-      }
+    const sess = readSession();
+    if (sess) {
+      const o = DISPLAY_OVERRIDES[sess.username] || { displayName: sess.username, role: sess.role };
+      setUser({ username: sess.username, displayName: o.displayName, role: o.role });
     }
+    setUnauthorizedHandler(() => {
+      // Server says session is dead — drop UI state and force the login screen.
+      setUser(null);
+    });
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   const login = (u: User) => {
-    localStorage.setItem('iron_hub_user', JSON.stringify(u));
+    // Login.tsx already wrote the session to localStorage via services/session.ts.
     setUser(u);
   };
 
   const logout = () => {
-    localStorage.removeItem('iron_hub_user');
+    serverLogout().catch(() => {});
+    clearSession();
     setUser(null);
   };
 
