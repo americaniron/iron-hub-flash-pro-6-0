@@ -196,9 +196,14 @@ const PaymentReceiptModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-[300] flex items-center justify-center p-4 no-print">
-      <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[95vh]">
-        <div className="p-6 border-b flex justify-between items-center bg-slate-50">
+    // The outer div carries the on-screen modal chrome (backdrop, fixed positioning, blur).
+    // It MUST NOT have .no-print — the global rule .no-print { display: none !important }
+    // would remove the entire subtree, including the receipt, from the print render tree.
+    // Only the modal HEADER (with the action buttons) is .no-print; the receipt body prints.
+    // The print:* utilities below neutralize the modal chrome so it doesn't bleed into print.
+    <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-[300] flex items-center justify-center p-4 print:bg-transparent print:backdrop-blur-none print:p-0 print:relative print:inset-auto print:z-auto print:block">
+      <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[95vh] print:shadow-none print:rounded-none print:max-w-none print:overflow-visible print:max-h-none print:block">
+        <div className="p-6 border-b flex justify-between items-center bg-slate-50 no-print">
             <h3 className="text-lg font-black uppercase tracking-wider text-slate-800">Payment Receipt</h3>
             <div className="flex gap-2 items-center">
                 {emailStatus && (
@@ -213,7 +218,7 @@ const PaymentReceiptModal: React.FC<{
                 <button onClick={onClose} className="p-2.5 bg-slate-200 text-slate-600 rounded-lg btn-app">✕</button>
             </div>
         </div>
-        <div className="flex-grow overflow-y-auto">
+        <div className="flex-grow overflow-y-auto print:overflow-visible">
             <PaymentReceipt payment={payment} account={account} invoice={invoice} />
         </div>
       </div>
