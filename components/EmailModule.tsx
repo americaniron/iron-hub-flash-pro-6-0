@@ -98,16 +98,16 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     if (!audioData || !getAudioAttachment || isAttaching) return;
     setIsAttaching('audio');
     try {
-      const base64Wav = await getAudioAttachment();
-      if (base64Wav) {
+      const base64Audio = await getAudioAttachment();
+      if (base64Audio) {
         // Calculate size from base64 string (approximate)
-        const sizeInMB = (base64Wav.length * 0.75) / (1024 * 1024);
-        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.wav`;
-        
+        const sizeInMB = (base64Audio.length * 0.75) / (1024 * 1024);
+        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.mp3`;
+
         if (!stagedAttachments.some(a => a.filename === filename)) {
           setStagedAttachments(prev => [...prev, {
             filename,
-            path: base64Wav,
+            path: base64Audio,
             size: `${sizeInMB.toFixed(2)} MB`
           }]);
         }

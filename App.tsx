@@ -84,32 +84,13 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-function decode(base64: string) {
+// ElevenLabs returns base64-encoded MP3. Decode to a Blob so we can play it via
+// <Audio> (native MP3 decode) and attach/download it as a real .mp3 file.
+function base64ToAudioBlob(base64: string): Blob {
   const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
-
-async function decodeAudioData(
-  data: Uint8Array,
-  ctx: AudioContext,
-  sampleRate: number,
-  numChannels: number,
-): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-    }
-  }
-  return buffer;
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+  return new Blob([bytes], { type: 'audio/mpeg' });
 }
 
 const InvoiceSystem = React.lazy(() => import('./components/InvoiceSystem.tsx').then(module => ({ default: module.InvoiceSystem })));
@@ -172,7 +153,8 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   
   const resultRef = useRef<HTMLDivElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentAudioUrlRef = useRef<string | null>(null);
   const prevLangRef = useRef(config.documentLanguage);
 
   useEffect(() => {
@@ -410,64 +392,40 @@ const App: React.FC = () => {
     setIsSpeaking(true);
     try {
       const base64Audio = await generateTTS(aiAnalysis, config.ttsLanguage);
-      if (base64Audio) {
-        setAudioData(base64Audio); // Save audio data for download
-        const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)({sampleRate: 24000});
-        audioContextRef.current = ctx;
-        const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        source.onended = () => setIsSpeaking(false);
-        source.start();
-      } else {
-        setIsSpeaking(false);
+      if (!base64Audio) { setIsSpeaking(false); return; }
+      setAudioData(base64Audio); // Save base64 for download / email-attach
+      // Stop any in-flight audio + revoke its URL before starting new playback
+      if (currentAudioRef.current) {
+        try { currentAudioRef.current.pause(); } catch {}
+        currentAudioRef.current = null;
       }
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current);
+        currentAudioUrlRef.current = null;
+      }
+      // Decode base64 → MP3 bytes → Blob → Object URL → native <audio> element.
+      // The browser's <audio> handles MP3 natively; no Web Audio / PCM math.
+      const url = URL.createObjectURL(base64ToAudioBlob(base64Audio));
+      const audio = new Audio(url);
+      currentAudioRef.current = audio;
+      currentAudioUrlRef.current = url;
+      const cleanup = () => {
+        if (currentAudioUrlRef.current === url) {
+          URL.revokeObjectURL(url);
+          currentAudioUrlRef.current = null;
+          currentAudioRef.current = null;
+        }
+        setIsSpeaking(false);
+      };
+      audio.onended = cleanup;
+      audio.onerror = () => { console.error('Audio playback failed'); cleanup(); };
+      await audio.play();
     } catch (e) {
       if (!handleApiError(e)) {
         console.error("TTS Error:", e);
       }
       setIsSpeaking(false);
     }
-  };
-  
-  const createWavBlob = (base64Audio: string): Blob => {
-    const writeString = (view: DataView, offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) {
-        view.setUint8(offset + i, str.charCodeAt(i));
-      }
-    };
-    
-    const sampleRate = 24000;
-    const numChannels = 1;
-    const bitsPerSample = 16;
-    
-    const pcmData = decode(base64Audio);
-    const dataSize = pcmData.length;
-
-    const buffer = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(buffer);
-
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + dataSize, true);
-    writeString(view, 8, 'WAVE');
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
-    view.setUint16(32, numChannels * (bitsPerSample / 8), true);
-    view.setUint16(34, bitsPerSample, true);
-    writeString(view, 36, 'data');
-    view.setUint32(40, dataSize, true);
-    
-    const pcmAsUint8 = new Uint8Array(pcmData.buffer);
-    for (let i = 0; i < dataSize; i++) {
-        view.setUint8(44 + i, pcmAsUint8[i]);
-    }
-
-    return new Blob([view], { type: 'audio/wav' });
   };
 
   // ---- WhatsApp Share Handlers ----
@@ -520,12 +478,12 @@ const App: React.FC = () => {
 
   const handleDownloadAudio = () => {
     if (!audioData) return;
-    const blob = createWavBlob(audioData);
+    const blob = base64ToAudioBlob(audioData);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = `AI-Analysis-${config.quoteId}.wav`;
+    a.download = `AI-Analysis-${config.quoteId}.mp3`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);
@@ -534,7 +492,7 @@ const App: React.FC = () => {
 
   const getAudioAttachment = async (): Promise<string | null> => {
     if (!audioData) return null;
-    const blob = createWavBlob(audioData);
+    const blob = base64ToAudioBlob(audioData);
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onloadend = () => {
