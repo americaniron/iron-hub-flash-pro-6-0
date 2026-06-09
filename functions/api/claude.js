@@ -11,6 +11,23 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+const DEFAULT_TEXT_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_IMAGE_MODEL = 'claude-sonnet-4-6';
+const MAX_MANUAL_THINKING_TOKENS = 60000;
+
+function normalizeTextModel(model) {
+  if (!model || model === 'claude-opus-4-6') {
+    return DEFAULT_TEXT_MODEL;
+  }
+  return model;
+}
+
+function normalizeMaxTokens(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
@@ -59,10 +76,10 @@ export async function onRequestPost(context) {
 // ─────────────────────────────────────────────────────────────
 async function handleTextRequest(body, apiKey) {
   const {
-    model = 'claude-opus-4-6',
+    model,
     messages,
     system,
-    max_tokens = 4096,
+    max_tokens,
     temperature,
     thinking,
   } = body;
@@ -74,9 +91,10 @@ async function handleTextRequest(body, apiKey) {
     );
   }
 
+  const payloadModel = normalizeTextModel(model);
   const payload = {
-    model,
-    max_tokens,
+    model: payloadModel,
+    max_tokens: normalizeMaxTokens(max_tokens, 4096),
     messages,
   };
 
@@ -85,9 +103,16 @@ async function handleTextRequest(body, apiKey) {
 
   // Extended thinking support
   if (thinking) {
+    delete payload.temperature;
+    const requestedBudget = normalizeMaxTokens(thinking.budget_tokens, 10000);
+    const safeBudget = Math.min(Math.max(requestedBudget, 1024), MAX_MANUAL_THINKING_TOKENS);
+    if (safeBudget >= payload.max_tokens) {
+      payload.max_tokens = safeBudget + 1024;
+    }
     payload.thinking = {
       type: 'enabled',
-      budget_tokens: thinking.budget_tokens || 10000,
+      budget_tokens: safeBudget,
+      display: thinking.display || 'omitted',
     };
   }
 
@@ -150,7 +175,7 @@ async function handleImageRequest(body, apiKey) {
   }
 
   const payload = {
-    model: 'claude-sonnet-4-6',
+    model: DEFAULT_IMAGE_MODEL,
     max_tokens: 16384,
     tools: [{
       type: 'image_generation',

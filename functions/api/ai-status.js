@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Cloudflare Pages Function — /api/ai-status
-// Returns whether GEMINI_API_KEY is configured
+// Returns whether production AI providers are configured
 // ---------------------------------------------------------------------------
 
 const H = {
@@ -10,8 +10,18 @@ const H = {
 
 export async function onRequestGet(context) {
   const { env } = context;
+  const anthropicConfigured = !!env.ANTHROPIC_API_KEY;
+  const elevenLabsConfigured = !!env.ELEVENLABS_API_KEY;
   return Response.json(
-    { configured: !!env.GEMINI_API_KEY, mode: 'server-proxy' },
+    {
+      configured: anthropicConfigured && elevenLabsConfigured,
+      mode: 'server-proxy',
+      providers: {
+        anthropic: anthropicConfigured,
+        elevenlabs: elevenLabsConfigured,
+        gemini: !!env.GEMINI_API_KEY,
+      },
+    },
     { status: 200, headers: H }
   );
 }

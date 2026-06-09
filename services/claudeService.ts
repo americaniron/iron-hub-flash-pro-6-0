@@ -1,12 +1,31 @@
 /**
  * Claude AI Service — Replaces Gemini across all AI features
  *
- * Text AI:       Claude Opus 4.6 (analysis, translation, email, OCR, tasks)
+ * Text AI:       Claude Sonnet 4.6 (analysis, translation, email, OCR, tasks)
  * Image Gen:     Claude API image generation tool
  * TTS:           ElevenLabs Multilingual v2
  */
 
 import { QuoteItem, ClientInfo, AppConfig, EmailDraft, InvoiceData } from "../types.ts";
+
+const CLAUDE_TEXT_MODEL = 'claude-sonnet-4-6';
+const STANDARD_MAX_TOKENS = 2048;
+const THINKING_MAX_TOKENS = 16000;
+const THINKING_BUDGET_TOKENS = 10000;
+const GEMINI_FALLBACK_TEXT_MODEL = 'gemini-2.5-flash';
+
+const containsArabic = (text: string): boolean => /[\u0600-\u06FF]/.test(text);
+const isAnthropicAccessError = (error: any): boolean => {
+  const msg = (error?.message || String(error)).toLowerCase();
+  return (
+    msg.includes("anthropic") ||
+    msg.includes("credit balance") ||
+    msg.includes("purchase credits") ||
+    msg.includes("billing") ||
+    msg.includes("api key is not configured") ||
+    msg.includes("invalid")
+  );
+};
 
 // ─── Proxy helpers ───────────────────────────────────────────
 
@@ -52,12 +71,38 @@ async function callElevenLabsTTS(text: string, voiceId?: string) {
   return await response.json();
 }
 
+async function callGeminiText(prompt: string, maxOutputTokens: number = STANDARD_MAX_TOKENS): Promise<string> {
+  const response = await fetch("/api/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: GEMINI_FALLBACK_TEXT_MODEL,
+      contents: prompt,
+      config: {
+        temperature: 0.1,
+        maxOutputTokens,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.details || errorData.error || `Gemini proxy error (${response.status})`);
+  }
+
+  const data = await response.json();
+  return data.text || data.candidates?.[0]?.content?.parts?.map((part: any) => part.text || '').join('') || '';
+}
+
 // ─── Error handling ──────────────────────────────────────────
 
 function handleAPIError(error: any): never {
   console.error("AI Service Error:", error);
   const msg = error?.message || String(error);
 
+  if (msg.includes("credit balance") || msg.includes("purchase credits") || msg.includes("billing")) {
+    throw new Error("Anthropic API billing credits are exhausted. Add credits in Anthropic Plans & Billing, then retry the quote analysis.");
+  }
   if (msg.includes("401") || msg.includes("invalid") || msg.includes("not configured")) {
     throw new Error("API key is not configured or invalid. Please ensure ANTHROPIC_API_KEY is set in the environment.");
   }
@@ -99,7 +144,16 @@ class CircuitBreaker {
           this.lastFailureTime = Date.now();
         }
       }
-      if (msg.includes("401") || msg.includes("invalid") || msg.includes("not configured")) {
+      if (
+        msg.includes("401") ||
+        msg.includes("invalid") ||
+        msg.includes("not configured") ||
+        msg.includes("credit balance") ||
+        msg.includes("purchase credits") ||
+        msg.includes("billing") ||
+        msg.includes("quota") ||
+        msg.includes("rate")
+      ) {
         handleAPIError(error);
       }
       return fallback(error);
@@ -133,8 +187,8 @@ export const translateText = async (text: string, targetLanguage: 'en' | 'ar'): 
   return breaker.execute(async () => {
     const resp = await callClaude({
       action: 'text',
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
+      model: CLAUDE_TEXT_MODEL,
+      max_tokens: STANDARD_MAX_TOKENS,
       temperature: 0.1,
       messages: [{ role: 'user', content: `Translate the following text to ${targetLanguage === 'ar' ? 'Arabic' : 'English'}. Preserve the original tone and technical terminology. Return ONLY the translation, nothing else.\n\nText:\n${text}` }],
     });
@@ -163,17 +217,23 @@ ${language === 'ar' ? 'IMPORTANT: Provide the entire analysis in ARABIC language
 
     const params: any = {
       action: 'text',
-      model: 'claude-opus-4-6',
-      max_tokens: 1024,
+      model: CLAUDE_TEXT_MODEL,
+      max_tokens: useThinking ? THINKING_MAX_TOKENS : 1024,
       messages: [{ role: 'user', content: prompt }],
     };
 
     if (useThinking) {
-      params.thinking = { budget_tokens: 10000 };
+      params.thinking = { budget_tokens: THINKING_BUDGET_TOKENS };
     }
 
-    const resp = await callClaude(params);
-    return resp.text || "Diagnostic analysis yielded no specific concerns.";
+    try {
+      const resp = await callClaude(params);
+      return resp.text || "Diagnostic analysis yielded no specific concerns.";
+    } catch (error) {
+      if (!isAnthropicAccessError(error)) throw error;
+      const fallbackText = await callGeminiText(prompt, 1024);
+      return fallbackText || "Diagnostic analysis yielded no specific concerns.";
+    }
   }, () => "Diagnostic analysis is currently unavailable due to system load. Please proceed with standard manual review.");
 };
 
@@ -186,8 +246,21 @@ export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): P
     let textToSpeak = text;
 
     // Translate to Arabic first if needed
-    if (language === 'ar' && text) {
-      const translated = await translateText(text, 'ar');
+    if (language === 'ar' && text && !containsArabic(text)) {
+      const translationPrompt = `Translate the following quote-analysis brief to Arabic. Preserve heavy-equipment technical terms and return only the Arabic text.\n\nText:\n${text}`;
+      const translated = await callClaude({
+          action: 'text',
+          model: CLAUDE_TEXT_MODEL,
+          max_tokens: STANDARD_MAX_TOKENS,
+          temperature: 0.1,
+          messages: [{ role: 'user', content: translationPrompt }],
+        })
+        .then(resp => resp.text || text)
+        .catch(async (error) => {
+          if (!isAnthropicAccessError(error)) throw error;
+          return await callGeminiText(translationPrompt, STANDARD_MAX_TOKENS) || text;
+        });
+
       if (translated && translated !== text) {
         textToSpeak = translated;
       }
@@ -207,7 +280,7 @@ export const editPartImage = async (base64Image: string, prompt: string): Promis
     const rawData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
     const analysisResp = await callClaude({
       action: 'text',
-      model: 'claude-opus-4-6',
+      model: CLAUDE_TEXT_MODEL,
       max_tokens: 512,
       messages: [{
         role: 'user',
@@ -269,8 +342,8 @@ export const analyzePartPhoto = async (base64Data: string, mimeType: string, use
 
     const params: any = {
       action: 'text',
-      model: 'claude-opus-4-6',
-      max_tokens: 1024,
+      model: CLAUDE_TEXT_MODEL,
+      max_tokens: useThinking ? THINKING_MAX_TOKENS : 1024,
       messages: [{
         role: 'user',
         content: [
@@ -281,7 +354,7 @@ export const analyzePartPhoto = async (base64Data: string, mimeType: string, use
     };
 
     if (useThinking) {
-      params.thinking = { budget_tokens: 10000 };
+      params.thinking = { budget_tokens: THINKING_BUDGET_TOKENS };
     }
 
     const resp = await callClaude(params);
@@ -296,8 +369,8 @@ export const performIntelligentTask = async (prompt: string): Promise<string> =>
   return breaker.execute(async () => {
     const resp = await callClaude({
       action: 'text',
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
+      model: CLAUDE_TEXT_MODEL,
+      max_tokens: STANDARD_MAX_TOKENS,
       messages: [{ role: 'user', content: prompt }],
     });
     return resp.text || "Task complete.";
@@ -341,7 +414,7 @@ Return ONLY a valid JSON object with "to", "subject", and "body" fields. No mark
 
     const resp = await callClaude({
       action: 'text',
-      model: 'claude-sonnet-4-6',
+      model: CLAUDE_TEXT_MODEL,
       max_tokens: 1024,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }],

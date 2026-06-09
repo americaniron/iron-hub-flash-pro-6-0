@@ -10,6 +10,16 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
@@ -82,9 +92,7 @@ export async function onRequestPost(context) {
 
     // Convert audio buffer to base64
     const audioBuffer = await response.arrayBuffer();
-    const base64Audio = btoa(
-      new Uint8Array(audioBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-    );
+    const base64Audio = arrayBufferToBase64(audioBuffer);
 
     return Response.json(
       { audioBase64: base64Audio, mimeType: 'audio/mpeg' },
