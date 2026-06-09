@@ -131,7 +131,7 @@ const PaymentReceiptModal: React.FC<{
     element.classList.add('pdf-generation-mode');
     document.body.classList.add('pdf-generation-mode-active');
     const opt = {
-      margin: [0.25, 0.5, 0.85, 0.5],
+      margin: [0.25, 0.5, 0.85, 0.5] as [number, number, number, number],
       filename: `Receipt-${payment.id}.pdf`,
       image: { type: 'jpeg' as const, quality: 0.98 },
       html2canvas: { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },

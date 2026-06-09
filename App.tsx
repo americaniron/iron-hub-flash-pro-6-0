@@ -76,6 +76,10 @@ const isApiKeyError = (error: any): boolean => {
     errString.includes("API_KEY_INVALID") ||
     errString.includes("API key invalid") ||
     errString.includes("API key") ||
+    errString.includes("Anthropic API billing") ||
+    errString.includes("credit balance") ||
+    errString.includes("purchase credits") ||
+    errString.includes("billing") ||
     errString.includes("RESOURCE_EXHAUSTED") ||
     errString.includes("quota exceeded") ||
     errString.includes("Quota exceeded") ||
@@ -225,10 +229,14 @@ const App: React.FC = () => {
 
   const handleApiError = (error: any) => {
     if (isApiKeyError(error)) {
-        console.error("A critical API key error occurred:", error);
-        alert("Your API Key appears to be invalid or lacks necessary permissions (e.g., billing not enabled). Please select a valid key. The application will now reload to re-verify your key.");
-        window.location.reload();
-        return true;
+      const errString = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
+      const isBillingIssue = errString.includes("credit balance") || errString.includes("purchase credits") || errString.includes("billing");
+      console.error("A production AI provider access error occurred:", error);
+      alert(isBillingIssue
+        ? "Anthropic API billing credits are exhausted. Add credits in Anthropic Plans & Billing, then retry the quote analysis."
+        : "The production AI provider key is missing, invalid, or lacks required permissions. Check the Cloudflare Pages AI secrets and retry."
+      );
+      return true;
     }
     return false;
   }
@@ -1002,7 +1010,7 @@ const App: React.FC = () => {
     document.body.classList.add('pdf-generation-mode-active');
     
     const opt = {
-      margin:       [0.25, 0.5, 0.85, 0.5], // top, right, bottom (room for footer), left — matches @page
+      margin:       [0.25, 0.5, 0.85, 0.5] as [number, number, number, number], // top, right, bottom (room for footer), left — matches @page
       filename:     `${config.quoteId || 'Document'}.pdf`,
       image:        { type: 'jpeg' as const, quality: 0.98 },
       html2canvas:  { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },

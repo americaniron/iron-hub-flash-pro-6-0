@@ -23,64 +23,11 @@ const formatCurrency = (amount: number) => {
   });
 };
 
-// --- Audio Helper Functions for Portable Download Link ---
-
-function decode(base64: string): Uint8Array {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function createWavBlob(base64Audio: string): Blob {
-  const writeString = (view: DataView, offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  };
-  
-  const sampleRate = 24000;
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  
-  const pcmData = decode(base64Audio);
-  const dataSize = pcmData.length;
-
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
-  view.setUint16(32, numChannels * (bitsPerSample / 8), true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataSize, true);
-  
-  const pcmAsUint8 = new Uint8Array(pcmData.buffer);
-  for (let i = 0; i < dataSize; i++) {
-      view.setUint8(44 + i, pcmAsUint8[i]);
-  }
-
-  return new Blob([view], { type: 'audio/wav' });
-};
-
-const blobToBase64 = (blob: Blob): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = (error) => reject(error);
-    reader.readAsDataURL(blob);
-  });
+// ElevenLabs returns base64-encoded MP3. Keep the bytes as MP3 instead of
+// wrapping them in a WAV header, which corrupts playback/downloads.
+const toMp3DataUrl = (base64Audio: string): string => {
+  if (base64Audio.startsWith('data:')) return base64Audio;
+  return `data:audio/mpeg;base64,${base64Audio}`;
 };
 
 const translations = {
@@ -224,17 +171,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
   useEffect(() => {
     if (audioData) {
-      const generateUrl = async () => {
-        try {
-          const blob = createWavBlob(audioData);
-          const dataUrl = await blobToBase64(blob);
-          setAudioDataUrl(dataUrl);
-        } catch (error) {
-          console.error("Failed to create audio data URL:", error);
-          setAudioDataUrl(null);
-        }
-      };
-      generateUrl();
+      setAudioDataUrl(toMp3DataUrl(audioData));
     } else {
       setAudioDataUrl(null);
     }
@@ -586,7 +523,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
                     <div className={`mt-6 pt-5 border-t border-slate-200/80 print:mt-2 print:pt-2 print:border-slate-300 flex ${isRtl ? 'justify-end' : 'justify-start'}`}>
                       <a 
                         href={audioDataUrl} 
-                        download={`AI-Briefing-${config.quoteId}.wav`} 
+                        download={`AI-Briefing-${config.quoteId}.mp3`} 
                         className="inline-flex items-center gap-3 px-6 py-3 bg-cat-black text-cat-yellow rounded-xl text-[10px] font-black uppercase tracking-[0.2em] no-underline shadow-lg hover:bg-cat-dark hover:-translate-y-0.5 transition-all duration-300"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V3"></path></svg>
