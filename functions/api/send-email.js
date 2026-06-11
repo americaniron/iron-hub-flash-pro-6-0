@@ -19,13 +19,14 @@ async function createSmtpClient(host, port) {
   const useImplicitTls = port === 465;
   const transportMode = useImplicitTls ? 'on' : 'starttls';
 
-  const socket = connect(`${host}:${port}`, {
+  const socket = connect({ hostname: host, port }, {
     secureTransport: transportMode,
     allowHalfOpen: false,
   });
 
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  let activeSocket = socket;
   let writer = socket.writable.getWriter();
   let reader = socket.readable.getReader();
 
@@ -49,10 +50,20 @@ async function createSmtpClient(host, port) {
     return readResponse();
   }
 
+  async function writeRaw(data) {
+    await writer.write(encoder.encode(data));
+  }
+
+  async function finishData() {
+    await writer.write(encoder.encode('\r\n.\r\n'));
+    return readResponse();
+  }
+
   async function upgradeToTls() {
     writer.releaseLock();
     reader.releaseLock();
     const tlsSocket = socket.startTls();
+    activeSocket = tlsSocket;
     writer = tlsSocket.writable.getWriter();
     reader = tlsSocket.readable.getReader();
   }
@@ -60,10 +71,10 @@ async function createSmtpClient(host, port) {
   function close() {
     try { writer.releaseLock(); } catch (_) {}
     try { reader.releaseLock(); } catch (_) {}
-    try { socket.close(); } catch (_) {}
+    try { activeSocket.close(); } catch (_) {}
   }
 
-  return { readResponse, sendCommand, upgradeToTls, close, isStartTls: !useImplicitTls };
+  return { readResponse, sendCommand, writeRaw, finishData, upgradeToTls, close, isStartTls: !useImplicitTls };
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +91,37 @@ function makeErr(message, response, command) {
 
 function b64(str) { return btoa(str); }
 function utf8b64(str) { return btoa(unescape(encodeURIComponent(str))); }
+
+function cleanHeaderValue(value) {
+  return String(value || '').replace(/[\r\n]+/g, ' ').trim();
+}
+
+function cleanFilename(value) {
+  return cleanHeaderValue(value || 'attachment').replace(/["\\]/g, '_') || 'attachment';
+}
+
+function cleanContentType(value) {
+  const contentType = cleanHeaderValue(value || 'application/octet-stream');
+  return /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(contentType)
+    ? contentType
+    : 'application/octet-stream';
+}
+
+async function writeBase64Lines(smtp, base64Content) {
+  const lineLength = 76;
+  const maxChunkLength = lineLength * 256;
+  let chunk = '';
+
+  for (let i = 0; i < base64Content.length; i += lineLength) {
+    chunk += base64Content.slice(i, i + lineLength) + '\r\n';
+    if (chunk.length >= maxChunkLength) {
+      await smtp.writeRaw(chunk);
+      chunk = '';
+    }
+  }
+
+  if (chunk) await smtp.writeRaw(chunk);
+}
 
 /** Process a data-URL attachment into {filename, base64Content, contentType} */
 function processAttachment(att) {
@@ -123,59 +165,53 @@ function buildHtmlBody(textBody) {
 </div>`;
 }
 
-/** Build a full MIME message with optional attachments */
-function buildMimeMessage({ from, replyTo, to, subject, textBody, htmlBody, messageId, attachments }) {
+/** Stream a full MIME message with optional attachments without building one huge string. */
+async function writeMimeMessage(smtp, { from, replyTo, to, subject, htmlBody, messageId, attachments }) {
   const date = new Date().toUTCString();
   const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
   const encodedSubject = `=?UTF-8?B?${utf8b64(subject)}?=`;
 
   const headers = [
-    `From: ${from}`,
-    `Reply-To: ${replyTo || from}`,
-    `To: ${to}`,
+    `From: ${cleanHeaderValue(from)}`,
+    `Reply-To: ${cleanHeaderValue(replyTo || from)}`,
+    `To: ${cleanHeaderValue(to)}`,
     `Subject: ${encodedSubject}`,
     `Date: ${date}`,
-    `Message-ID: ${messageId}`,
+    `Message-ID: ${cleanHeaderValue(messageId)}`,
     `MIME-Version: 1.0`,
     `X-Mailer: IronHub/5.7`,
   ];
 
   if (attachments && attachments.length > 0) {
-    // Multipart/mixed for email + attachments
     headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+    await smtp.writeRaw(headers.join('\r\n') + '\r\n\r\n');
 
-    let body = headers.join('\r\n') + '\r\n\r\n';
+    await smtp.writeRaw(`--${boundary}\r\n`);
+    await smtp.writeRaw('Content-Type: text/html; charset=UTF-8\r\n');
+    await smtp.writeRaw('Content-Transfer-Encoding: base64\r\n\r\n');
+    await writeBase64Lines(smtp, utf8b64(htmlBody));
+    await smtp.writeRaw('\r\n');
 
-    // HTML part
-    const htmlB64 = utf8b64(htmlBody);
-    const htmlLines = htmlB64.match(/.{1,76}/g) || [htmlB64];
-    body += `--${boundary}\r\n`;
-    body += `Content-Type: text/html; charset=UTF-8\r\n`;
-    body += `Content-Transfer-Encoding: base64\r\n\r\n`;
-    body += htmlLines.join('\r\n') + '\r\n\r\n';
-
-    // Attachment parts
     for (const att of attachments) {
-      body += `--${boundary}\r\n`;
-      body += `Content-Type: ${att.contentType}; name="${att.filename}"\r\n`;
-      body += `Content-Disposition: attachment; filename="${att.filename}"\r\n`;
-      body += `Content-Transfer-Encoding: base64\r\n\r\n`;
-      const attLines = att.base64Content.match(/.{1,76}/g) || [att.base64Content];
-      body += attLines.join('\r\n') + '\r\n\r\n';
+      const filename = cleanFilename(att.filename);
+      const contentType = cleanContentType(att.contentType);
+      await smtp.writeRaw(`--${boundary}\r\n`);
+      await smtp.writeRaw(`Content-Type: ${contentType}; name="${filename}"\r\n`);
+      await smtp.writeRaw(`Content-Disposition: attachment; filename="${filename}"\r\n`);
+      await smtp.writeRaw('Content-Transfer-Encoding: base64\r\n\r\n');
+      await writeBase64Lines(smtp, att.base64Content);
+      await smtp.writeRaw('\r\n');
     }
 
-    body += `--${boundary}--\r\n`;
-    return body;
-  } else {
-    // Simple HTML email, no attachments
-    headers.push(`Content-Type: text/html; charset=UTF-8`);
-    headers.push(`Content-Transfer-Encoding: base64`);
-
-    const htmlB64 = utf8b64(htmlBody);
-    const htmlLines = htmlB64.match(/.{1,76}/g) || [htmlB64];
-
-    return headers.join('\r\n') + '\r\n\r\n' + htmlLines.join('\r\n');
+    await smtp.writeRaw(`--${boundary}--\r\n`);
+    return smtp.finishData();
   }
+
+  headers.push('Content-Type: text/html; charset=UTF-8');
+  headers.push('Content-Transfer-Encoding: base64');
+  await smtp.writeRaw(headers.join('\r\n') + '\r\n\r\n');
+  await writeBase64Lines(smtp, utf8b64(htmlBody));
+  return smtp.finishData();
 }
 
 // ---------------------------------------------------------------------------
@@ -231,17 +267,6 @@ export async function onRequestPost(context) {
   const htmlBody = buildHtmlBody(textBody);
   const messageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 12)}@americanironus.com>`;
 
-  const mimeMessage = buildMimeMessage({
-    from: `"American Iron Dispatch" <${DISPLAY_FROM_EMAIL}>`,
-    replyTo: `"American Iron" <${REPLY_TO_EMAIL}>`,
-    to,
-    subject,
-    textBody,
-    htmlBody,
-    messageId,
-    attachments: processedAttachments,
-  });
-
   // ── Send via SMTP ──
   let smtp;
   try {
@@ -286,9 +311,17 @@ export async function onRequestPost(context) {
     r = await smtp.sendCommand('DATA');
     if (r.code !== 354) throw makeErr('DATA rejected', r, 'DATA');
 
-    // 8. Send message (dot-stuff leading dots per RFC 5321)
-    const stuffed = mimeMessage.replace(/^\./gm, '..');
-    r = await smtp.sendCommand(stuffed + '\r\n.');
+    // 8. Stream message data in chunks. Building + encoding a full PDF email in
+    // one string can exceed Cloudflare Pages Function resource limits.
+    r = await writeMimeMessage(smtp, {
+      from: `"American Iron Dispatch" <${DISPLAY_FROM_EMAIL}>`,
+      replyTo: `"American Iron" <${REPLY_TO_EMAIL}>`,
+      to,
+      subject,
+      htmlBody,
+      messageId,
+      attachments: processedAttachments,
+    });
     if (r.code !== 250) throw makeErr('Message rejected', r, 'END DATA');
 
     // 9. QUIT

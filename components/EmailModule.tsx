@@ -186,7 +186,17 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
         body: JSON.stringify(payload),
       });
 
-      const result = await response.json();
+      const rawResult = await response.text();
+      let result: any = {};
+      try {
+        result = rawResult ? JSON.parse(rawResult) : {};
+      } catch {
+        const plainText = rawResult.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        result = {
+          error: response.status === 503 ? 'Email worker exceeded Cloudflare resource limits' : `HTTP ${response.status}`,
+          details: plainText.slice(0, 300) || 'The email service returned a non-JSON response.',
+        };
+      }
 
       if (response.ok) {
         addLog("Dispatch sequence confirmed...");
