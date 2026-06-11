@@ -13,7 +13,6 @@ const CORS_HEADERS = {
 
 const FREE_TIER_MODELS = new Set([
   'gemini-3.1-flash-lite',
-  'gemini-3.1-flash-tts-preview',
 ]);
 
 // Handle CORS preflight

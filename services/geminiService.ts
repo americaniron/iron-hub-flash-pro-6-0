@@ -1,7 +1,6 @@
 import { QuoteItem, ClientInfo, AppConfig, EmailDraft, InvoiceData } from "../types.ts";
 
 const GEMINI_FREE_MODEL = "gemini-3.1-flash-lite";
-const GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview";
 const STANDARD_MAX_TOKENS = 2048;
 
 type GeminiProxyParams = {
@@ -37,6 +36,25 @@ function extractText(response: any, fallback = ""): string {
   );
 }
 
+async function callElevenLabsTTS(text: string, voiceId?: string) {
+  const response = await fetch("/api/elevenlabs-tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      voice_id: voiceId || "pNInz6obpgDQGcFmaJgB",
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(payload.details || payload.error || `ElevenLabs proxy error (${response.status})`);
+  }
+
+  return payload;
+}
+
 function handleGeminiError(error: any): never {
   console.error("Gemini API Error:", error);
 
@@ -63,6 +81,14 @@ function handleGeminiError(error: any): never {
   }
 
   throw new Error(`AI Service Error: ${errorMessage}`);
+}
+
+function handleProviderAccessError(error: any): never {
+  const errorMessage = error?.message || String(error);
+  if (errorMessage.includes("ElevenLabs")) {
+    throw new Error(`ElevenLabs TTS Error: ${errorMessage}`);
+  }
+  handleGeminiError(error);
 }
 
 class CircuitBreaker {
@@ -105,6 +131,7 @@ class CircuitBreaker {
       if (
         errorMessage.includes("401") ||
         errorMessage.includes("403") ||
+        errorMessage.includes("ElevenLabs") ||
         errorMessage.includes("API_KEY_INVALID") ||
         errorMessage.includes("key not configured") ||
         errorMessage.includes("not configured") ||
@@ -113,7 +140,7 @@ class CircuitBreaker {
         errorMessage.includes("RESOURCE_EXHAUSTED") ||
         errorMessage.includes("rate limit")
       ) {
-        handleGeminiError(error);
+        handleProviderAccessError(error);
       }
 
       console.warn("Gemini call failed, returning fallback.", error);
@@ -138,58 +165,6 @@ class CircuitBreaker {
 
 const geminiCircuitBreaker = new CircuitBreaker();
 const containsArabic = (text: string): boolean => /[\u0600-\u06FF]/.test(text);
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const clean = base64.includes(",") ? base64.split(",")[1] : base64;
-  const binary = atob(clean);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function writeAscii(view: DataView, offset: number, value: string) {
-  for (let i = 0; i < value.length; i++) {
-    view.setUint8(offset + i, value.charCodeAt(i));
-  }
-}
-
-function pcm16Base64ToWavBase64(pcmBase64: string, sampleRate = 24000): string {
-  const pcm = base64ToBytes(pcmBase64);
-  const wav = new Uint8Array(44 + pcm.length);
-  const view = new DataView(wav.buffer);
-  const channels = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + pcm.length, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, pcm.length, true);
-  wav.set(pcm, 44);
-
-  return bytesToBase64(wav);
-}
 
 async function translateForSpeech(text: string, language: "en" | "ar"): Promise<string> {
   if (language !== "ar" || !text || containsArabic(text)) {
@@ -298,28 +273,8 @@ ${language === "ar" ? "IMPORTANT: Provide the entire analysis in Arabic." : "Pro
 export const generateTTS = async (text: string, language: "en" | "ar" = "en"): Promise<string | null> => {
   return geminiCircuitBreaker.execute(async () => {
     const textToSpeak = await translateForSpeech(text, language);
-    const response = await callGeminiProxy({
-      model: GEMINI_TTS_MODEL,
-      contents: [{ parts: [{ text: `Say clearly and professionally: ${textToSpeak}` }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Kore" },
-          },
-        },
-      },
-    });
-
-    const audioPart = response?.candidates?.[0]?.content?.parts?.find((part: any) => part.inlineData?.data);
-    const base64Audio = audioPart?.inlineData?.data;
-    const mimeType = audioPart?.inlineData?.mimeType || "";
-
-    if (!base64Audio) {
-      return null;
-    }
-
-    return mimeType.includes("wav") ? base64Audio : pcm16Base64ToWavBase64(base64Audio);
+    const response = await callElevenLabsTTS(textToSpeak);
+    return response.audioBase64 || null;
   }, () => null);
 };
 

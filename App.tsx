@@ -81,6 +81,7 @@ const isApiKeyError = (error: any): boolean => {
     errString.includes("billing") ||
     errString.includes("Gemini API") ||
     errString.includes("Gemini free-tier") ||
+    errString.includes("ElevenLabs") ||
     errString.includes("RESOURCE_EXHAUSTED") ||
     errString.includes("quota exceeded") ||
     errString.includes("Quota exceeded") ||
@@ -89,13 +90,12 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-// Gemini TTS returns PCM; the service wraps it as base64 WAV for playback,
-// download, and email attachment.
+// ElevenLabs returns base64-encoded MP3 for playback, download, and email.
 function base64ToAudioBlob(base64: string): Blob {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return new Blob([bytes], { type: 'audio/wav' });
+  return new Blob([bytes], { type: 'audio/mpeg' });
 }
 
 const InvoiceSystem = React.lazy(() => import('./components/InvoiceSystem.tsx').then(module => ({ default: module.InvoiceSystem })));
@@ -231,8 +231,8 @@ const App: React.FC = () => {
   const handleApiError = (error: any) => {
     if (isApiKeyError(error)) {
       const errString = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
-      console.error("A production Gemini access error occurred:", error);
-      alert("Gemini is missing, invalid, blocked by permissions, or out of free-tier quota. Check the Cloudflare Pages GEMINI_API_KEY secret and Gemini API quota, then retry.");
+      console.error("A production AI provider access error occurred:", error);
+      alert("Gemini or ElevenLabs is missing, invalid, blocked by permissions, or out of quota. Check the Cloudflare Pages GEMINI_API_KEY and ELEVENLABS_API_KEY secrets, then retry.");
       return true;
     }
     return false;
@@ -408,7 +408,7 @@ const App: React.FC = () => {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
       }
-      // Decode base64 WAV bytes -> Blob -> Object URL -> native audio element.
+      // Decode base64 MP3 bytes -> Blob -> Object URL -> native audio element.
       const url = URL.createObjectURL(base64ToAudioBlob(base64Audio));
       const audio = new Audio(url);
       currentAudioRef.current = audio;
@@ -487,7 +487,7 @@ const App: React.FC = () => {
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = `AI-Analysis-${config.quoteId}.wav`;
+    a.download = `AI-Analysis-${config.quoteId}.mp3`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);

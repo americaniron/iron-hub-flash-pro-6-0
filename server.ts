@@ -9,8 +9,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const FREE_TIER_GEMINI_MODELS = new Set([
   "gemini-3.1-flash-lite",
-  "gemini-3.1-flash-tts-preview",
 ]);
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return Buffer.from(binary, "binary").toString("base64");
+}
 
 async function startServer() {
   const app = express();
@@ -21,9 +30,15 @@ async function startServer() {
 
   // AI Status Check
   app.get("/api/ai-status", (req, res) => {
+    const geminiConfigured = !!process.env.GEMINI_API_KEY;
+    const elevenLabsConfigured = !!process.env.ELEVENLABS_API_KEY;
     res.json({ 
-      configured: !!process.env.GEMINI_API_KEY,
-      mode: "server-proxy"
+      configured: geminiConfigured && elevenLabsConfigured,
+      mode: "server-proxy",
+      providers: {
+        gemini: geminiConfigured,
+        elevenlabs: elevenLabsConfigured,
+      },
     });
   });
 
@@ -61,6 +76,67 @@ async function startServer() {
       res.status(500).json({ 
         error: "Gemini API Error", 
         details: error instanceof Error ? error.message : String(error) 
+      });
+    }
+  });
+
+  app.post("/api/elevenlabs-tts", async (req, res) => {
+    if (!process.env.ELEVENLABS_API_KEY) {
+      return res.status(500).json({
+        error: "ElevenLabs API key not configured. Please set ELEVENLABS_API_KEY in the environment.",
+      });
+    }
+
+    const {
+      text,
+      voice_id = "pNInz6obpgDQGcFmaJgB",
+      model_id = "eleven_multilingual_v2",
+      stability = 0.5,
+      similarity_boost = 0.75,
+    } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ error: "Missing required field: text" });
+    }
+
+    try {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice_id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Accept": "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text,
+          model_id,
+          voice_settings: {
+            stability,
+            similarity_boost,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorDetail;
+        try { errorDetail = JSON.parse(errorText); } catch { errorDetail = { message: errorText }; }
+        return res.status(response.status).json({
+          error: "ElevenLabs API Error",
+          details: errorDetail?.detail?.message || errorText,
+          status: response.status,
+        });
+      }
+
+      const audioBuffer = await response.arrayBuffer();
+      res.json({
+        audioBase64: arrayBufferToBase64(audioBuffer),
+        mimeType: "audio/mpeg",
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: "ElevenLabs API Error",
+        details: error instanceof Error ? error.message : String(error),
       });
     }
   });
