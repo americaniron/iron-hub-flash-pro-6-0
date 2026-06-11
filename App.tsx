@@ -7,7 +7,7 @@ import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
-import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/claudeService.ts';
+import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { Login } from './components/Login.tsx';
@@ -76,10 +76,11 @@ const isApiKeyError = (error: any): boolean => {
     errString.includes("API_KEY_INVALID") ||
     errString.includes("API key invalid") ||
     errString.includes("API key") ||
-    errString.includes("Anthropic API billing") ||
     errString.includes("credit balance") ||
     errString.includes("purchase credits") ||
     errString.includes("billing") ||
+    errString.includes("Gemini API") ||
+    errString.includes("Gemini free-tier") ||
     errString.includes("RESOURCE_EXHAUSTED") ||
     errString.includes("quota exceeded") ||
     errString.includes("Quota exceeded") ||
@@ -88,13 +89,13 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-// ElevenLabs returns base64-encoded MP3. Decode to a Blob so we can play it via
-// <Audio> (native MP3 decode) and attach/download it as a real .mp3 file.
+// Gemini TTS returns PCM; the service wraps it as base64 WAV for playback,
+// download, and email attachment.
 function base64ToAudioBlob(base64: string): Blob {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return new Blob([bytes], { type: 'audio/mpeg' });
+  return new Blob([bytes], { type: 'audio/wav' });
 }
 
 const InvoiceSystem = React.lazy(() => import('./components/InvoiceSystem.tsx').then(module => ({ default: module.InvoiceSystem })));
@@ -230,12 +231,8 @@ const App: React.FC = () => {
   const handleApiError = (error: any) => {
     if (isApiKeyError(error)) {
       const errString = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
-      const isBillingIssue = errString.includes("credit balance") || errString.includes("purchase credits") || errString.includes("billing");
-      console.error("A production AI provider access error occurred:", error);
-      alert(isBillingIssue
-        ? "Anthropic API billing credits are exhausted. Add credits in Anthropic Plans & Billing, then retry the quote analysis."
-        : "The production AI provider key is missing, invalid, or lacks required permissions. Check the Cloudflare Pages AI secrets and retry."
-      );
+      console.error("A production Gemini access error occurred:", error);
+      alert("Gemini is missing, invalid, blocked by permissions, or out of free-tier quota. Check the Cloudflare Pages GEMINI_API_KEY secret and Gemini API quota, then retry.");
       return true;
     }
     return false;
@@ -411,8 +408,7 @@ const App: React.FC = () => {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
       }
-      // Decode base64 → MP3 bytes → Blob → Object URL → native <audio> element.
-      // The browser's <audio> handles MP3 natively; no Web Audio / PCM math.
+      // Decode base64 WAV bytes -> Blob -> Object URL -> native audio element.
       const url = URL.createObjectURL(base64ToAudioBlob(base64Audio));
       const audio = new Audio(url);
       currentAudioRef.current = audio;
@@ -491,7 +487,7 @@ const App: React.FC = () => {
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = `AI-Analysis-${config.quoteId}.mp3`;
+    a.download = `AI-Analysis-${config.quoteId}.wav`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);

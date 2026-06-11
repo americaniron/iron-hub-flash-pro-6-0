@@ -11,6 +11,11 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+const FREE_TIER_MODELS = new Set([
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-tts-preview',
+]);
+
 // Handle CORS preflight
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -43,6 +48,13 @@ export async function onRequestPost(context) {
   if (!model || !contents) {
     return Response.json(
       { error: 'Missing required fields: model, contents' },
+      { status: 400, headers: CORS_HEADERS }
+    );
+  }
+
+  if (!FREE_TIER_MODELS.has(model)) {
+    return Response.json(
+      { error: `Model ${model} is not enabled. This app is restricted to free-tier Gemini models.` },
       { status: 400, headers: CORS_HEADERS }
     );
   }

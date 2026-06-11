@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AppConfig, ClientInfo, ParseMode, QuoteItem, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus } from '../types.ts';
 import { parseTextData, parsePdfFile, parseExcelFile } from '../services/parserService.ts';
-import { performIntelligentTask } from '../services/claudeService.ts';
+import { performIntelligentTask } from '../services/geminiService.ts';
 import { Logo } from './Logo.tsx';
 import { Country, City } from 'country-state-city';
 

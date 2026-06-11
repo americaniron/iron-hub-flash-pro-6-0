@@ -7,6 +7,10 @@ import { GoogleGenAI } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const FREE_TIER_GEMINI_MODELS = new Set([
+  "gemini-3.1-flash-lite",
+  "gemini-3.1-flash-tts-preview",
+]);
 
 async function startServer() {
   const app = express();
@@ -31,6 +35,12 @@ async function startServer() {
       console.error("Gemini Proxy Error: GEMINI_API_KEY is not set in environment.");
       return res.status(500).json({ 
         error: "Gemini API key not configured on server. Please set GEMINI_API_KEY in the environment." 
+      });
+    }
+
+    if (!FREE_TIER_GEMINI_MODELS.has(model)) {
+      return res.status(400).json({
+        error: `Model ${model} is not enabled. This app is restricted to free-tier Gemini models.`,
       });
     }
 

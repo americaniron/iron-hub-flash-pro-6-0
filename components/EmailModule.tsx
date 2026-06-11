@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ClientInfo, AppConfig, QuoteItem, EmailDraft, InvoiceData } from '../types.ts';
-import { generateEmailDraft } from '../services/claudeService.ts';
+import { generateEmailDraft } from '../services/geminiService.ts';
 
 interface EmailModuleProps {
   isOpen: boolean;
@@ -102,7 +102,7 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
       if (base64Audio) {
         // Calculate size from base64 string (approximate)
         const sizeInMB = (base64Audio.length * 0.75) / (1024 * 1024);
-        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.mp3`;
+        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.wav`;
 
         if (!stagedAttachments.some(a => a.filename === filename)) {
           setStagedAttachments(prev => [...prev, {
