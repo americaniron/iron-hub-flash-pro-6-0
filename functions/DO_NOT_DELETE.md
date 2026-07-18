@@ -1,12 +1,10 @@
-# PROTECTED DIRECTORY - DO NOT DELETE
+# Iron Hub Pages Boundary
 
-The files in `functions/api/` are **Cloudflare Pages Functions** (serverless endpoints).
-They are CRITICAL for the application to work. Deleting them breaks:
+Iron Hub is delivered inside IronSuite. The authenticated Suite Cloudflare
+Worker owns email, AI, voice, data, and synchronization integrations. The root
+Pages middleware rejects all direct `/api/*` traffic so this origin cannot
+expose a provider proxy, SMTP relay, or unauthenticated database endpoint.
 
-- **send-email.js** — Email dispatch via SMTP (customers won't receive quotes)
-- **gemini.js** — Gemini AI proxy (AI features stop working)
-- **ai-status.js** — AI configuration check
-- **test-email.js** — SMTP connection testing
-
-These files are protected by a GitHub Actions workflow that will automatically
-restore them if deleted. Do NOT remove this directory or its contents.
+Do not add Pages API functions, provider credentials, or public integration
+routes to this project. Integrations belong in `fixmyiron-suite-api`, where
+authorization, tenant isolation, rate limits, and audit logging are enforced.

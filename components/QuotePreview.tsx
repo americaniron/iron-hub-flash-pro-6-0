@@ -3,7 +3,8 @@ import React, { useState, useEffect } from 'react';
 import { QuoteItem, ClientInfo, AppConfig, PhotoMode } from '../types.ts';
 import { PartImage } from './PartImage.tsx';
 import { Logo } from './Logo.tsx';
-import { Country } from 'country-state-city';
+import { calculateQuoteFinancials } from '../services/documentMath.ts';
+import { countryName } from '../services/countryOptions.ts';
 
 interface QuotePreviewProps {
   items: QuoteItem[];
@@ -137,7 +138,7 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
     country: client.billingCountry,
   };
 
-  const countryName = effectiveAddress.country ? (Country.getCountryByCode(effectiveAddress.country)?.name || effectiveAddress.country) : '';
+  const addressCountryName = countryName(effectiveAddress.country);
 
   return (
     <div className="bg-slate-50/80 p-8 rounded-[2rem] border border-slate-200/60 text-[10px] h-full flex flex-col address-block print:flex-1 print:bg-white print:p-3 print:border-slate-300 print:rounded-lg shadow-sm print:break-inside-avoid">
@@ -149,7 +150,7 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
         <div className="text-slate-600 leading-relaxed uppercase font-bold print:text-[8pt] print:text-black">
           {effectiveAddress.address}<br />
           {effectiveAddress.city}, {effectiveAddress.state} {effectiveAddress.zip}<br />
-          {countryName}
+          {addressCountryName}
         </div>
         <div className="pt-3 flex flex-col gap-1.5 border-t border-slate-200/80 mt-3">
            {client.contactName && <p className="text-slate-500 font-black uppercase text-[10px] tracking-widest print:text-[7pt] print:text-slate-700">{t.attn}: <span className="text-cat-black">{client.contactName}</span></p>}
@@ -165,7 +166,6 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
   const isRtl = lang === 'ar';
   const t = translations[lang];
   
-  const markupFactor = 1 + (config.markupPercentage / 100);
   const [audioDataUrl, setAudioDataUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -176,20 +176,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
     }
   }, [audioData]);
   
-  const markedItems = items.map(item => {
-    const sellPrice = Math.round((item.unitPrice * markupFactor) * 100) / 100;
-    return { ...item, sellPrice, extPrice: sellPrice * item.qty };
-  });
-
-  const subtotal = Math.round(markedItems.reduce((sum, i) => sum + i.extPrice, 0) * 100) / 100;
-  const totalWeight = items.reduce((sum, i) => sum + (i.qty * i.weight), 0);
-  const totalCoreDeposits = Math.round(markedItems.reduce((sum, i) => sum + (i.qty * (i.coreDeposit || 0)), 0) * 100) / 100;
-
-  const logistics = Math.round((totalWeight * config.logisticsRate) * 100) / 100;
-  const discount = Math.round((subtotal * (config.discountPercentage / 100)) * 100) / 100;
-  const creditOrRefund = config.creditOrRefund || 0;
-  
-  const total = Math.round((subtotal + logistics - discount - creditOrRefund + totalCoreDeposits) * 100) / 100;
+  const { markedItems, subtotal, totalWeight, totalCoreDeposits, logistics, discount, creditOrRefund, total } = calculateQuoteFinancials(items, config);
 
   return (
     <div className="max-w-[1100px] mx-auto bg-white shadow-[0_20px_60px_rgba(0,0,0,0.08)] my-16 print:my-0 print:shadow-none print:max-w-none print:overflow-visible overflow-hidden rounded-[2.5rem] print:rounded-none border-t-[12px] border-t-cat-black relative" dir={isRtl ? 'rtl' : 'ltr'}>
@@ -211,7 +198,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Rule 1: Define page layout and guarantee margins. */
           @page {
             size: LETTER;
-            margin: 0 0.5in 0.85in 0.5in !important; /* extra bottom for fixed footer */
+            margin: 0.45in 0.5in 0.55in 0.5in !important;
           }
 
           /* Rule 2: Reset and prepare the document body for printing. */
@@ -232,13 +219,13 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           body {
             color: #000 !important;
             font-family: 'Plus Jakarta Sans', sans-serif !important;
-            font-size: 9pt !important;
-            line-height: 1.4 !important; /* Increased for readability */
+            font-size: 8.5pt !important;
+            line-height: 1.32 !important;
             direction: ${isRtl ? 'rtl' : 'ltr'} !important;
           }
 
           .no-print { display: none !important; }
-          .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.85in !important; }
+          .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; }
 
           /* Rule 3: Enforce a rigid, non-breaking table structure for line items. */
           table {
@@ -246,7 +233,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
             border-collapse: collapse !important;
             table-layout: fixed !important;
             border-spacing: 0 !important;
-            margin-bottom: 15pt !important; /* Increased spacing */
+            margin-bottom: 10pt !important;
           }
           thead { display: table-header-group !important; }
           tfoot { display: table-footer-group !important; }
@@ -254,7 +241,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Keep section headers attached to following content */
           h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
           th, td {
-            padding: 8pt !important; /* Unified and increased padding */
+            padding: 5pt !important;
             border-bottom: 1pt solid #dee2e6 !important; /* Sharper border color */
             vertical-align: top !important;
             word-wrap: break-word !important;
@@ -268,11 +255,11 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
             font-weight: 900 !important;
             text-align: ${isRtl ? 'right' : 'left'} !important;
             text-transform: uppercase !important;
-            font-size: 7.5pt !important; /* Slightly larger for clarity */
+            font-size: 7pt !important;
             letter-spacing: 0.08em !important; /* Wider spacing */
           }
 
-          td { font-size: 8.5pt !important; color: #000 !important; }
+          td { font-size: 8pt !important; color: #000 !important; }
           .num-col { text-align: ${isRtl ? 'left' : 'right'} !important; white-space: nowrap !important; }
           .summary-table { table-layout: auto !important; }
           .summary-table td { border-bottom: none !important; padding: 2pt 0 !important; }
@@ -280,25 +267,25 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Rule 4: Suite-style header banner for print */
           .print-header {
             margin: 0 !important;
-            margin-bottom: 12pt !important;
+            margin-bottom: 8pt !important;
             width: 100% !important;
           }
           .print-header > div:last-child {
-            padding: 14pt 20pt !important;
+            padding: 10pt 14pt !important;
           }
           .print-header .quote-heading {
-            font-size: 36pt !important;
+            font-size: 24pt !important;
             letter-spacing: 1px !important;
           }
           .print-header .company-name {
-            font-size: 18pt !important;
+            font-size: 14pt !important;
           }
           .print-header .company-detail {
             font-size: 8pt !important;
           }
           .print-header .logo-box {
-            width: 65pt !important;
-            height: 65pt !important;
+            width: 50pt !important;
+            height: 50pt !important;
           }
           .print-header h1 { font-size: 26pt !important; color: #000 !important; }
           .print-header h2 { font-size: 20pt !important; }
@@ -318,7 +305,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           .line-item-notes { font-size: 7.5pt !important; }
 
           /* Rule 5: Stabilize layout of summary blocks to prevent page-break issues. */
-          .ai-analysis-box, .terms-box, .terms-box p, .summary-table, .summary-table tr, .totals-container, .address-block {
+          .summary-table, .summary-table tr, .totals-container, .address-block {
             page-break-inside: avoid !important;
             break-inside: avoid !important;
             page-break-before: auto !important;
@@ -329,26 +316,28 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
             flex-direction: row !important;
             justify-content: space-between !important;
             gap: 20pt !important;
-            margin-top: 20pt !important;
+            margin-top: 12pt !important;
             width: 100% !important;
-            break-before: avoid !important; /* don't sit alone at top of new page */
+            break-before: auto !important;
           }
           .ai-analysis-box {
              background: #f8f9fa !important;
              border: 1pt solid #dee2e6 !important;
              border-left: 3pt solid #ffcd00 !important;
           }
-          .ai-analysis-box p, .terms-box p { font-size: 8.5pt !important; }
-          .ai-analysis-box h4, .terms-box div { font-size: 8pt !important; }
+          .ai-analysis-box p { font-size: 8.5pt !important; }
+          .terms-box p { font-size: 7.25pt !important; line-height: 1.28 !important; }
+          .ai-analysis-box h4 { font-size: 8pt !important; }
+          .terms-box div { font-size: 7.5pt !important; }
 
           .print-footer {
             display: block !important;
             position: fixed;
-            bottom: 0.25in;
+            bottom: 0.15in;
             left: 0.5in;
             right: 0.5in;
             text-align: center;
-            font-size: 8pt !important;
+            font-size: 6.5pt !important;
             color: #6c757d !important;
           }
           .print-footer p {
@@ -535,7 +524,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
             <div className="space-y-4 print:mt-4 terms-box">
                <div className={`text-[11px] text-slate-400 uppercase font-black tracking-[0.2em] print:text-black ${isRtl ? 'mr-2 text-right' : 'ml-2 text-left'}`}>{t.terms}</div>
-               <p className={`text-[8px] text-slate-500 leading-relaxed uppercase font-bold print:text-black bg-slate-50/80 p-8 rounded-[2rem] border border-slate-200/60 shadow-sm ${isRtl ? 'text-right' : 'text-left'}`}>
+               <p className={`text-[8px] text-slate-500 leading-relaxed uppercase font-bold print:text-black bg-slate-50/80 p-8 print:p-3 rounded-[2rem] print:rounded-lg border border-slate-200/60 shadow-sm print:shadow-none ${isRtl ? 'text-right' : 'text-left'}`}>
                   {config.specialInstructions || defaultTerms[lang]}
                </p>
             </div>

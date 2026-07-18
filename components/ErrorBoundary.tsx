@@ -1,4 +1,4 @@
-import React, { ErrorInfo, ReactNode } from 'react';
+import React, { ReactNode } from 'react';
 
 interface Props {
   children?: ReactNode;
@@ -18,10 +18,6 @@ export class ErrorBoundary extends React.Component<Props, State> {
     return { hasError: true };
   }
 
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Uncaught error:", error, errorInfo);
-  }
-
   render = () => {
     if (this.state.hasError) {
       return (
@@ -38,7 +34,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
             <h2 className="text-4xl font-black uppercase text-white tracking-tighter mb-4">Critical System Fault</h2>
             <p className="text-slate-400 text-sm mb-10 leading-relaxed font-bold uppercase tracking-tight">
-              The Engineering Hub encountered an unrecoverable error. Your local data has been preserved.
+              The Engineering Hub encountered an unrecoverable error. Reload and retry; successfully synchronized records remain available.
             </p>
 
             <button

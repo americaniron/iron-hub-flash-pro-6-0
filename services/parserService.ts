@@ -1,5 +1,7 @@
 
 import { QuoteItem, ClientInfo } from '../types.ts';
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
+import { readSpreadsheetRows } from './spreadsheetService.ts';
 
 // --- Helper Functions ---
 
@@ -714,10 +716,7 @@ export const parseTextData = (text: string): QuoteItem[] => {
 };
 
 export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
-  const data = await file.arrayBuffer();
-  const workbook = window.XLSX.read(data, { type: 'array' });
-  const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-  const jsonData = window.XLSX.utils.sheet_to_json(worksheet);
+  const jsonData = await readSpreadsheetRows(file);
   return jsonData.map((row: any) => {
     const unitPrice = Number(row.unitPrice || row.Price || row['Unit Price'] || 0);
     const weight = Number(row.weight || row.Weight || 0);
@@ -735,9 +734,11 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
 };
 
 export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], clientInfo: Partial<ClientInfo>}> => {
-  if (!window.pdfjsLib) throw new Error("PDF Engine not loaded.");
+  if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('PDF files must be between 1 byte and 10 MB.');
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
   
   let fullItems: QuoteItem[] = [];
   let clientInfo: Partial<ClientInfo> = {};
@@ -828,8 +829,7 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
     // --- Image Extraction Logic ---
     const images: { y: number, x: number, dataUrl: string, width: number, height: number }[] = [];
     
-    const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[], depth: number = 0) => {
-        if (depth > 5) return; // Prevent infinite recursion
+    const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
         const transformStack: any[] = [];
         let currentTransform = [...initialTransform];
 
@@ -842,24 +842,24 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
             const fn = fnArray[i];
             const args = argsArray[i];
 
-            if (fn === window.pdfjsLib.OPS.save) {
+            if (fn === pdfjs.OPS.save) {
                 transformStack.push([...currentTransform]);
-            } else if (fn === window.pdfjsLib.OPS.restore) {
+            } else if (fn === pdfjs.OPS.restore) {
                 currentTransform = transformStack.pop() || [1, 0, 0, 1, 0, 0];
-            } else if (fn === window.pdfjsLib.OPS.transform) {
-                currentTransform = window.pdfjsLib.Util.transform(currentTransform, args);
-            } else if (fn === window.pdfjsLib.OPS.paintImageXObject || fn === window.pdfjsLib.OPS.paintInlineImageXObject) {
+            } else if (fn === pdfjs.OPS.transform) {
+                currentTransform = pdfjs.Util.transform(currentTransform, args);
+            } else if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject) {
                 try {
                     let imgData: any = null;
-                    if (fn === window.pdfjsLib.OPS.paintImageXObject) {
+                    if (fn === pdfjs.OPS.paintImageXObject) {
                         const imgKey = args[0];
                         try {
                             imgData = page.objs.get(imgKey);
                             if (imgData instanceof Promise) {
                                 imgData = await imgData;
                             }
-                        } catch (e) {
-                            console.warn("Failed to get image object", e);
+                        } catch {
+                            imgData = null;
                         }
                     } else {
                         imgData = args[0];
@@ -908,23 +908,9 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
                             });
                         }
                     }
-                } catch (e) { console.warn("Error extracting image", e); }
-            } else if (fn === window.pdfjsLib.OPS.paintFormXObject) {
-                try {
-                    const formKey = args[0];
-                    let form: any = null;
-                    try {
-                        form = page.objs.get(formKey);
-                        if (form instanceof Promise) {
-                            form = await form;
-                        }
-                    } catch (e) {
-                        console.warn("Failed to get form object", e);
-                    }
-                    if (form && form.fnArray && form.argsArray) {
-                        await processOperatorList(form.fnArray, form.argsArray, currentTransform, depth + 1);
-                    }
-                } catch (e) { console.warn("Error extracting form", e); }
+                } catch {
+                    // Text extraction still succeeds when a PDF image cannot be decoded.
+                }
             }
         }
     };
@@ -932,7 +918,9 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
     try {
         const operatorList = await page.getOperatorList();
         await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
-    } catch (e) { console.warn("Could not parse images from PDF page.", e); }
+    } catch {
+        // PDF image extraction is best-effort and must not block quote extraction.
+    }
 
     // Associate extracted images with items on this page
     // Robust matching: Find the image closest to the item's Y coordinate

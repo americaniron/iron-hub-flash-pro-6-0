@@ -11,6 +11,7 @@ interface InventorySystemProps {
 export const InventorySystem: React.FC<InventorySystemProps> = ({ currentUser }) => {
   const [inventory, setInventory] = useState<InventoryPart[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -20,11 +21,12 @@ export const InventorySystem: React.FC<InventorySystemProps> = ({ currentUser })
 
   const loadInventory = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await dbService.getInventory(currentUser.username);
       setInventory(data);
-    } catch (error) {
-      console.error("Failed to load inventory:", error);
+    } catch {
+      setLoadError('Inventory could not be synchronized. Retry after Live Sync reconnects.');
     } finally {
       setIsLoading(false);
     }
@@ -152,6 +154,13 @@ export const InventorySystem: React.FC<InventorySystemProps> = ({ currentUser })
               {isLoading ? (
                 <tr>
                   <td colSpan={5} className="p-12 text-center text-slate-500 font-medium">Loading inventory...</td>
+                </tr>
+              ) : loadError ? (
+                <tr>
+                  <td colSpan={5} className="p-12 text-center" role="alert">
+                    <p className="font-medium text-red-600">{loadError}</p>
+                    <button type="button" onClick={() => { void loadInventory(); }} className="mt-4 px-4 py-2 rounded-lg bg-cat-black text-white text-xs font-bold uppercase">Retry</button>
+                  </td>
                 </tr>
               ) : filteredInventory.length === 0 ? (
                 <tr>

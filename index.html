@@ -8,41 +8,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="description" content="American Iron Logistics & Supply Hub - Enterprise Quoting System" />
     <title>IRON HUB | Enterprise Quoting</title>
-    <script>
-      // Ensure process.env exists for the browser
-      window.process = window.process || {};
-      window.process.env = window.process.env || {};
-      // In AI Studio Build, API_KEY is often injected into the environment
-    </script>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23000000'/><path fill='%23ffcd00' d='M16 7l-8 18h3.5l2-4.5h9l2 4.5h3.5L16 7zm-1.5 11l3-7 3 7h-6z'/></svg>">
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- PDF.js & XLSX CDNs -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-    <script>
-        if (typeof window !== 'undefined') {
-            window.pdfjsLibUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        }
-    </script>
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              cat: {
-                yellow: '#ffcd00',
-                black: '#000000',
-                dark: '#111111',
-                gray: '#1a1a1a',
-                light: '#f4f4f4'
-              }
-            }
-          }
-        }
-      }
-    </script>
     <style>
         :root {
             --brand-yellow: #ffcd00;
@@ -94,11 +61,14 @@
             tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
             thead { display: table-header-group !important; }
             tfoot { display: table-footer-group !important; }
-            /* Keep address blocks, totals, terms, and warranty disclaimers from splitting */
-            .address-block, .totals-container, .totals-container-print, .terms-box, .summary-table,
-            .invoice-print-footer, .receipt-header, .ai-analysis-box {
+            /* Keep compact cards intact, while long terms and warranty text may flow to the next page. */
+            .address-block, .summary-table, .receipt-header, .ai-analysis-box {
                 break-inside: avoid !important;
                 page-break-inside: avoid !important;
+            }
+            .totals-container, .totals-container-print, .terms-box, .invoice-print-footer {
+                break-inside: auto !important;
+                page-break-inside: auto !important;
             }
             /* Keep section headers attached to the content that follows */
             h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
@@ -140,11 +110,7 @@
            @media print is NOT active during html2canvas capture, so these rules
            must be present outside the print block to take effect on PDFs. */
         .pdf-generation-mode .address-block,
-        .pdf-generation-mode .totals-container,
-        .pdf-generation-mode .totals-container-print,
-        .pdf-generation-mode .terms-box,
         .pdf-generation-mode .summary-table,
-        .pdf-generation-mode .invoice-print-footer,
         .pdf-generation-mode .receipt-header,
         .pdf-generation-mode .ai-analysis-box,
         .pdf-generation-mode tr,
@@ -152,6 +118,13 @@
         .pdf-generation-mode th {
           break-inside: avoid !important;
           page-break-inside: avoid !important;
+        }
+        .pdf-generation-mode .totals-container,
+        .pdf-generation-mode .totals-container-print,
+        .pdf-generation-mode .terms-box,
+        .pdf-generation-mode .invoice-print-footer {
+          break-inside: auto !important;
+          page-break-inside: auto !important;
         }
         .pdf-generation-mode thead { display: table-header-group !important; }
         .pdf-generation-mode tfoot { display: table-footer-group !important; }
@@ -245,20 +218,6 @@
             100% { height: 20%; }
         }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react": "https://esm.sh/react@^19.2.3",
-    "react-dom": "https://esm.sh/react-dom@^19.2.3",
-    "react-dom/client": "https://esm.sh/react-dom@^19.2.3/client",
-    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "vite": "https://esm.sh/vite@^7.3.1",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
-  }
-}
-</script>
 </head>
   <body>
     <div id="root"></div>

@@ -1,20 +1,25 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Iron Hub 6.0
 
-# Run and deploy your AI Studio app
+Iron Hub is the quoting, invoicing, customer, inventory, voice, and document
+workspace embedded in IronSuite. Production runs entirely on Cloudflare:
 
-This contains everything you need to run your app locally.
+- The Hub is deployed as Cloudflare Pages at `iron-hub-flash-pro-6-0`.
+- The authenticated `fixmyiron-suite-api` Worker owns AI, email, transcription,
+  data persistence, audit logging, and tenant authorization.
+- The standalone Pages origin rejects direct `/api/*` requests. Do not add
+  provider keys, SMTP credentials, Gemini configuration, or a separate backend
+  to this repository.
 
-View your app in AI Studio: https://ai.studio/apps/b44c42fd-95c5-4628-bc41-2dbedcf1531b
+## Local checks
 
-## Run Locally
+```sh
+npm install
+npm run lint
+npm test
+npm run build
+npm run dev
+```
 
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+The local dev server is for UI, import, and PDF checks. Authenticated AI,
+email, transcription, and canonical Suite synchronization require an active
+IronSuite session through the production Hub proxy.

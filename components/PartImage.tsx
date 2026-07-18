@@ -6,7 +6,7 @@
 
 
 import React, { useState, useEffect } from 'react';
-import { editPartImage } from '../services/geminiService.ts';
+import { editPartImage } from '../services/claudeService.ts';
 import { PhotoMode } from '../types.ts';
 
 interface PartImageProps {
@@ -48,8 +48,7 @@ export const PartImage: React.FC<PartImageProps> = ({ partNo, photoMode, origina
       const blob = new Blob([ab], { type: mimeString });
       newObjectUrl = URL.createObjectURL(blob);
       setObjectUrl(newObjectUrl);
-    } catch (e) {
-      console.error("Failed to create object URL from base64", e);
+    } catch {
       setObjectUrl(currentImageUrl); // Fallback to base64 on error
     }
     
@@ -112,7 +111,7 @@ export const PartImage: React.FC<PartImageProps> = ({ partNo, photoMode, origina
           <div className="bg-white p-8 rounded-[2rem] w-full max-w-md shadow-3xl">
             <h4 className="text-[12px] font-black uppercase tracking-widest text-slate-900 mb-6 flex items-center gap-3">
               <svg className="w-4 h-4 text-cat-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-              Gemini Image Editor
+              Nano Banana Image Editor
             </h4>
             <textarea 
               className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-xl text-xs font-medium outline-none focus:border-cat-yellow transition-all mb-6 h-32"

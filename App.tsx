@@ -1,19 +1,22 @@
 
-import React, { useState, useRef, useEffect, useCallback, Suspense } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ConfigPanel } from './components/ConfigPanel.tsx';
 import { QuotePreview } from './components/QuotePreview.tsx';
 import { EmailModule } from './components/EmailModule.tsx';
 import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
+import { InvoiceSystem } from './components/InvoiceSystem.tsx';
+import { AccountsSystem } from './components/AccountsSystem.tsx';
+import { InventorySystem } from './components/InventorySystem.tsx';
+import { Dashboard } from './components/Dashboard.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
-import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/geminiService.ts';
+import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/claudeService.ts';
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
-import { Login } from './components/Login.tsx';
 import { activityBridge } from './services/activityBridge.ts';
 import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
-import html2pdf from 'html2pdf.js';
+import { calculateQuoteFinancials } from './services/documentMath.ts';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
 const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
@@ -28,37 +31,71 @@ const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
   </div>
 );
 
-// Persistent login: remembers the logged-in user across sessions via localStorage
+type HubAuthenticationState = 'loading' | 'ready' | 'unavailable';
+
+function isHubSessionUser(value: unknown): value is User {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<User>;
+  return typeof candidate.username === 'string' && candidate.username.length > 0
+    && typeof candidate.displayName === 'string' && candidate.displayName.length > 0
+    && typeof candidate.role === 'string' && candidate.role.length > 0;
+}
+
+// The Hub is embedded only through IronSuite's authenticated proxy. It never
+// accepts its own password or persists a separate browser-side identity.
 const useAuthenticatedUser = (): {
   user: User | null;
-  login: (user: User) => void;
-  logout: () => void;
+  authenticationState: HubAuthenticationState;
+  retryAuthentication: () => void;
 } => {
   const [user, setUser] = useState<User | null>(null);
+  const [authenticationState, setAuthenticationState] = useState<HubAuthenticationState>('loading');
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
-    // Restore session from localStorage
-    const saved = localStorage.getItem('iron_hub_user');
-    if (saved) {
-      try {
-        setUser(JSON.parse(saved));
-      } catch {
-        localStorage.removeItem('iron_hub_user');
-      }
-    }
-  }, []);
-
-  const login = (u: User) => {
-    localStorage.setItem('iron_hub_user', JSON.stringify(u));
-    setUser(u);
-  };
-
-  const logout = () => {
-    localStorage.removeItem('iron_hub_user');
+    const controller = new AbortController();
+    let cancelled = false;
+    setAuthenticationState('loading');
     setUser(null);
-  };
+    try {
+      localStorage.removeItem('iron_hub_user');
+    } catch {
+      // Storage is not required for the Suite-scoped session.
+    }
 
-  return { user, login, logout };
+    const loadSession = async () => {
+      try {
+        const response = await fetch('/api/hub-session', {
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || !isHubSessionUser((body as { user?: unknown }).user)) {
+          throw new Error('The signed-in IronSuite session could not be verified.');
+        }
+        if (!cancelled) {
+          setUser(body.user);
+          setAuthenticationState('ready');
+        }
+      } catch {
+        if (!cancelled && !controller.signal.aborted) {
+          setAuthenticationState('unavailable');
+        }
+      }
+    };
+
+    void loadSession();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [retryToken]);
+
+  const retryAuthentication = useCallback(() => setRetryToken((value) => value + 1), []);
+
+  return { user, authenticationState, retryAuthentication };
 };
 
 const generateDocumentId = (isInvoice: boolean) => {
@@ -76,12 +113,10 @@ const isApiKeyError = (error: any): boolean => {
     errString.includes("API_KEY_INVALID") ||
     errString.includes("API key invalid") ||
     errString.includes("API key") ||
+    errString.includes("Anthropic API billing") ||
     errString.includes("credit balance") ||
     errString.includes("purchase credits") ||
     errString.includes("billing") ||
-    errString.includes("Gemini API") ||
-    errString.includes("Gemini free-tier") ||
-    errString.includes("ElevenLabs") ||
     errString.includes("RESOURCE_EXHAUSTED") ||
     errString.includes("quota exceeded") ||
     errString.includes("Quota exceeded") ||
@@ -90,7 +125,8 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-// ElevenLabs returns base64-encoded MP3 for playback, download, and email.
+// ElevenLabs returns base64-encoded MP3. Decode to a Blob so we can play it via
+// <Audio> (native MP3 decode) and attach/download it as a real .mp3 file.
 function base64ToAudioBlob(base64: string): Blob {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -98,16 +134,15 @@ function base64ToAudioBlob(base64: string): Blob {
   return new Blob([bytes], { type: 'audio/mpeg' });
 }
 
-const InvoiceSystem = React.lazy(() => import('./components/InvoiceSystem.tsx').then(module => ({ default: module.InvoiceSystem })));
-const AccountsSystem = React.lazy(() => import('./components/AccountsSystem.tsx').then(module => ({ default: module.AccountsSystem })));
-const InventorySystem = React.lazy(() => import('./components/InventorySystem.tsx').then(module => ({ default: module.InventorySystem })));
-const Dashboard = React.lazy(() => import('./components/Dashboard.tsx').then(module => ({ default: module.Dashboard })));
+const canonicalSyncFailureMessage = (recordType: string) =>
+  `${recordType} was saved only in this browser because IronSuite did not confirm the update. Check Live Sync and retry before relying on it from another device.`;
 
 const App: React.FC = () => {
-  const { user, login, logout } = useAuthenticatedUser();
+  const { user, authenticationState, retryAuthentication } = useAuthenticatedUser();
   const [activeSystem, setActiveSystem] = useState<'quoting' | 'invoicing' | 'accounts' | 'inventory' | 'dashboard'>('quoting');
   const [initialInvoiceData, setInitialInvoiceData] = useState<InvoiceData | null>(null);
   const [invoiceToSend, setInvoiceToSend] = useState<InvoiceData | null>(null);
+  const [invoicePaymentLink, setInvoicePaymentLink] = useState<string | null>(null);
 
   const getDefaultExpiration = () => {
     const d = new Date();
@@ -153,7 +188,6 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [customLogo, setCustomLogo] = useState<string | null>('/logo.png');
-  const [hasDraft, setHasDraft] = useState(false);
   const [isEmailOpen, setIsEmailOpen] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   
@@ -170,8 +204,8 @@ const App: React.FC = () => {
           .then(translated => {
             setAiAnalysis(translated);
           })
-          .catch(err => {
-            console.error("Translation failed:", err);
+          .catch(() => {
+            alert('AI analysis could not be translated. The current analysis remains available in its original language.');
           })
           .finally(() => {
             setIsAnalyzing(false);
@@ -188,7 +222,6 @@ const App: React.FC = () => {
       try {
         // Initialize server connection & migrate local data if needed
         const { serverConnected } = await dbService.initialize(user.username);
-        console.log(`[App] Data layer: ${serverConnected ? 'Cloud D1 (permanent)' : 'Local IndexedDB (fallback)'}`);
         activityBridge.init(); // Flush any queued activities from previous session
 
         const [accounts, quotes, invoicesData, paymentsData, recurringData, templatesData, inventoryData] = await Promise.all([
@@ -219,20 +252,96 @@ const App: React.FC = () => {
           setTemplates(templatesData);
         }
         
-        setSyncStatus('stable');
-      } catch (e) {
-        console.error("Cloud Sync Error:", e);
+        setSyncStatus(serverConnected ? 'stable' : 'error');
+      } catch {
         setSyncStatus('error');
       }
     };
     syncCloudData();
   }, [user]);
 
+  useEffect(() => {
+    if (!user || window.parent === window) return;
+    const pendingStores = new Set<'accounts' | 'quotes' | 'invoices' | 'payments' | 'inventory'>();
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconciliationTimer: ReturnType<typeof setInterval> | null = null;
+    let refreshing = false;
+
+    const queueAllCanonicalStores = () => {
+      ['accounts', 'quotes', 'invoices', 'payments', 'inventory'].forEach((store) => pendingStores.add(store as 'accounts' | 'quotes' | 'invoices' | 'payments' | 'inventory'));
+    };
+
+    const refreshStores = async () => {
+      if (refreshing || pendingStores.size === 0) return;
+      refreshing = true;
+      const stores = new Set(pendingStores);
+      pendingStores.clear();
+      setSyncStatus('syncing');
+      try {
+        const { serverConnected } = await dbService.refreshConnection(user.username);
+        if (stores.has('accounts')) setCustomerAccounts(await dbService.getCustomerAccounts(user.username));
+        if (stores.has('quotes')) setQuoteHistory(await dbService.getQuotes(user.username));
+        if (stores.has('invoices')) setInvoices(await dbService.getInvoices(user.username));
+        if (stores.has('payments')) setPayments(await dbService.getPayments(user.username));
+        if (stores.has('inventory')) setInventory(await dbService.getInventory(user.username));
+        setSyncStatus(serverConnected ? 'stable' : 'error');
+      } catch {
+        setSyncStatus('error');
+      } finally {
+        refreshing = false;
+        if (pendingStores.size > 0) scheduleRefresh();
+      }
+    };
+
+    const scheduleRefresh = () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void refreshStores();
+      }, 250);
+    };
+
+    const handleSuiteMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== window.parent) return;
+      const message = event.data as { type?: unknown; event?: { type?: unknown } } | null;
+      if (!message || typeof message.type !== 'string') return;
+      if (message.type === 'iron-suite-refresh') {
+        queueAllCanonicalStores();
+      } else if (message.type === 'iron-suite-sync-event') {
+        const sourceType = message.event?.type;
+        const store = sourceType === 'customer' ? 'accounts'
+          : sourceType === 'quote' ? 'quotes'
+          : sourceType === 'invoice' ? 'invoices'
+          : sourceType === 'payment' ? 'payments'
+          : sourceType === 'item' ? 'inventory'
+          : null;
+        if (store) pendingStores.add(store);
+      }
+      scheduleRefresh();
+    };
+
+    window.addEventListener('message', handleSuiteMessage);
+    // WebSocket events provide the immediate path. This bounded backstop
+    // repairs a stale iframe after a transient browser/network disconnect.
+    reconciliationTimer = setInterval(() => {
+      queueAllCanonicalStores();
+      scheduleRefresh();
+    }, 30_000);
+    return () => {
+      window.removeEventListener('message', handleSuiteMessage);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (reconciliationTimer) clearInterval(reconciliationTimer);
+    };
+  }, [user]);
+
   const handleApiError = (error: any) => {
     if (isApiKeyError(error)) {
       const errString = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
-      console.error("A production AI provider access error occurred:", error);
-      alert("Gemini or ElevenLabs is missing, invalid, blocked by permissions, or out of quota. Check the Cloudflare Pages GEMINI_API_KEY and ELEVENLABS_API_KEY secrets, then retry.");
+      const isBillingIssue = errString.includes("credit balance") || errString.includes("purchase credits") || errString.includes("billing");
+      alert(isBillingIssue
+        ? "The protected AI service could not complete this request. Claude is tried first and the Cloudflare Workers AI fallback is used automatically for supported billing or rate-limit failures. Please retry shortly."
+        : "The protected AI service is unavailable. Check the Cloudflare Worker AI secrets and retry."
+      );
       return true;
     }
     return false;
@@ -287,7 +396,8 @@ const App: React.FC = () => {
           originalImages: item.originalImages || []
         };
       });
-      await dbService.addOrUpdateInventoryParts(user.username, inventoryParts);
+      const inventorySync = await dbService.addOrUpdateInventoryParts(user.username, inventoryParts);
+      if (!inventorySync.synced) setSyncStatus('error');
       activityBridge.inventoryUpdated(inventoryParts.length, user.username);
 
       // Also save to image pool if images exist
@@ -362,11 +472,13 @@ const App: React.FC = () => {
             imageUrl: imageUrl,
             originalImages: item.originalImages || []
           };
-          await dbService.addOrUpdateInventoryParts(user.username, [inventoryPart]);
+          const inventorySync = await dbService.addOrUpdateInventoryParts(user.username, [inventoryPart]);
+          if (!inventorySync.synced) setSyncStatus('error');
         }
       } catch (error) {
-        console.error(`Failed to generate image for ${item.partNo}:`, error);
-        handleApiError(error);
+        if (!handleApiError(error)) {
+          alert(`Image generation failed for ${item.partNo}. Please retry this item.`);
+        }
       }
     });
   
@@ -408,7 +520,8 @@ const App: React.FC = () => {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
       }
-      // Decode base64 MP3 bytes -> Blob -> Object URL -> native audio element.
+      // Decode base64 → MP3 bytes → Blob → Object URL → native <audio> element.
+      // The browser's <audio> handles MP3 natively; no Web Audio / PCM math.
       const url = URL.createObjectURL(base64ToAudioBlob(base64Audio));
       const audio = new Audio(url);
       currentAudioRef.current = audio;
@@ -422,12 +535,13 @@ const App: React.FC = () => {
         setIsSpeaking(false);
       };
       audio.onended = cleanup;
-      audio.onerror = () => { console.error('Audio playback failed'); cleanup(); };
+      audio.onerror = () => {
+        alert('Voice playback failed. Generate the voice analysis again and retry.');
+        cleanup();
+      };
       await audio.play();
     } catch (e) {
-      if (!handleApiError(e)) {
-        console.error("TTS Error:", e);
-      }
+      if (!handleApiError(e)) alert('Voice analysis is temporarily unavailable. Please try again.');
       setIsSpeaking(false);
     }
   };
@@ -455,13 +569,12 @@ const App: React.FC = () => {
       // Open WhatsApp API send page — prompts "Open WhatsApp?" dialog
       const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
       const text = encodeURIComponent(
-        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${items.reduce((s, i) => s + i.qty * i.unitPrice, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${calculateQuoteFinancials(items, config).total.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
       );
       window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
       if (user) activityBridge.quoteWhatsApp(config.quoteId, client.company || client.contactName || 'N/A', user.username);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
-      console.error('WhatsApp quote share error:', err);
       alert('WhatsApp share failed. Please try again.');
     }
   };
@@ -475,7 +588,6 @@ const App: React.FC = () => {
       window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
-      console.error('WhatsApp analysis share error:', err);
       alert('WhatsApp share failed. Please try again.');
     }
   };
@@ -507,7 +619,7 @@ const App: React.FC = () => {
   };
 
   const handleSaveToBook = useCallback(async (clientData: ClientInfo) => {
-    if (!user || !clientData.company) return;
+    if (!user || !clientData.company) return false;
     let existingAccount = clientData.id ? customerAccounts.find(acc => acc.id === clientData.id) : customerAccounts.find(acc => acc.company.toLowerCase() === clientData.company.toLowerCase());
     let updatedAccounts;
     if (existingAccount) {
@@ -517,44 +629,53 @@ const App: React.FC = () => {
       updatedAccounts = [...customerAccounts, newAccount];
     }
     setCustomerAccounts(updatedAccounts);
-    await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    setSyncStatus('syncing');
+    const sync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    if (!sync.synced) {
+      setSyncStatus('error');
+      alert(canonicalSyncFailureMessage('Customer'));
+      return false;
+    }
+    setSyncStatus('stable');
     if (existingAccount) {
       activityBridge.customerUpdated(clientData.contactName || '', clientData.company || '', user.username);
     } else {
       activityBridge.customerAdded(clientData.contactName || '', clientData.company || '', user.username);
     }
+    return true;
   }, [user, customerAccounts]);
 
 
   const handleDeleteFromBook = async (id: string) => {
-    if (!user) return;
-    const deletedAccount = customerAccounts.find(c => c.id === id);
-    const updatedBook = customerAccounts.filter(c => c.id !== id);
-    setCustomerAccounts(updatedBook);
-    await dbService.saveCustomerAccounts(user.username, updatedBook);
-    if (deletedAccount) activityBridge.customerDeleted(deletedAccount.company || deletedAccount.contactName || id, user.username);
+    const account = customerAccounts.find((candidate) => candidate.id === id);
+    alert(`${account?.company || 'This customer'} remains a canonical IronSuite record. Remove it from IronSuite's customer module so linked quotes, invoices, and payments stay consistent.`);
+    return false;
   };
   
-  const handleLogout = () => {
-    logout();
-  };
-
   const handleSaveInvoices = async (newInvoices: InvoiceData[]) => {
-    if (!user) return;
+    if (!user) return false;
     setSyncStatus('syncing');
     try {
       // Detect newly created invoices for activity logging
       const existingInvIds = new Set(invoices.map(i => i.id));
       const brandNewInvoices = newInvoices.filter(i => !existingInvIds.has(i.id));
       setInvoices(newInvoices);
-      await dbService.saveInvoices(user.username, newInvoices);
+      const sync = await dbService.saveInvoices(user.username, newInvoices);
+      if (!sync.synced) {
+        setSyncStatus('error');
+        alert(canonicalSyncFailureMessage('Invoice'));
+        return false;
+      }
       setSyncStatus('stable');
       for (const inv of brandNewInvoices) {
         const invClient = customerAccounts.find(c => c.id === inv.clientId);
         activityBridge.invoiceCreated(inv.id, invClient?.company || inv.clientId || 'N/A', inv.total, user.username);
       }
+      return true;
     } catch (error) {
       setSyncStatus('error');
+      alert('Invoice could not be saved. Please retry after Live Sync reconnects.');
+      return false;
     }
   };
 
@@ -617,11 +738,11 @@ const App: React.FC = () => {
       if (changed) {
         setInvoices(newInvoices);
         setRecurringInvoices(updatedRecurring);
-        await Promise.all([
+        const [invoiceSync] = await Promise.all([
           dbService.saveInvoices(user.username, newInvoices),
           dbService.saveRecurringInvoices(user.username, updatedRecurring)
         ]);
-        console.log("Generated recurring invoices.");
+        if (!invoiceSync.synced) setSyncStatus('error');
       }
     };
 
@@ -631,49 +752,31 @@ const App: React.FC = () => {
   }, [user, recurringInvoices, invoices]);
   
   const handleSaveAccounts = async (updatedAccounts: CustomerAccount[]) => {
-    if (!user) return;
+    if (!user) return false;
     setCustomerAccounts(updatedAccounts);
-    await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    setSyncStatus('syncing');
+    const sync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    if (!sync.synced) {
+      setSyncStatus('error');
+      alert(canonicalSyncFailureMessage('Customer directory'));
+      return false;
+    }
+    setSyncStatus('stable');
+    return true;
   };
   
   const handleDeleteAccount = async (accountId: string) => {
-    if (!user) return;
     const accountToDelete = customerAccounts.find(acc => acc.id === accountId);
-    if (!accountToDelete || !window.confirm(`Are you sure you want to permanently delete ${accountToDelete.company}? This action cannot be undone.`)) return;
-    
-    setSyncStatus('syncing');
-    const updatedAccounts = customerAccounts.filter(acc => acc.id !== accountId);
-    const updatedInvoices = invoices.filter(inv => inv.clientId !== accountId);
-    const updatedPayments = payments.filter(pay => pay.clientId !== accountId);
-    const updatedQuotes = quoteHistory.filter(q => q.payload.client.accountNumber !== accountToDelete.accountNumber);
-    setCustomerAccounts(updatedAccounts);
-    setInvoices(updatedInvoices);
-    setPayments(updatedPayments);
-    setQuoteHistory(updatedQuotes);
-    await Promise.all([
-      dbService.saveCustomerAccounts(user.username, updatedAccounts),
-      dbService.saveInvoices(user.username, updatedInvoices),
-      dbService.savePayments(user.username, updatedPayments),
-      dbService.saveAllQuotes(user.username, updatedQuotes)
-    ]);
-    setSyncStatus('stable');
-    activityBridge.customerDeleted(accountToDelete.company || accountToDelete.contactName || accountId, user.username);
-    alert(`${accountToDelete.company} has been permanently deleted.`);
+    alert(`${accountToDelete?.company || 'This customer'} is linked to canonical IronSuite records. Manage deletion from IronSuite so its quotes, invoices, and payments are not orphaned.`);
+    return false;
   };
 
 
   const handlePaymentsUpdate = async (newPayments: Payment[]) => {
-    if (!user) return;
-    // Detect newly added payments for activity logging
+    if (!user) return false;
+    setSyncStatus('syncing');
     const existingIds = new Set(payments.map(p => p.id));
     const brandNewPayments = newPayments.filter(p => !existingIds.has(p.id));
-    setPayments(newPayments);
-    await dbService.savePayments(user.username, newPayments);
-    // Log each new payment to activity bridge
-    for (const np of brandNewPayments) {
-      const payClient = customerAccounts.find(c => c.id === np.clientId);
-      activityBridge.paymentRecorded(np.id, payClient?.company || np.clientId || 'Unknown', np.amount, np.method || 'other', user.username);
-    }
     const invoiceIdsToUpdate = new Set(newPayments.map(p => p.invoiceId));
     let invoicesToUpdate = [...invoices];
     let changed = false;
@@ -688,16 +791,53 @@ const App: React.FC = () => {
             }
         }
     }
-    if (changed) handleSaveInvoices(invoicesToUpdate);
+    // The canonical invoice must exist and reflect its new balance before its
+    // payment is synchronized. This preserves the Suite's accounting invariant.
+    if (changed) {
+      setInvoices(invoicesToUpdate);
+      const invoiceSync = await dbService.saveInvoices(user.username, invoicesToUpdate);
+      if (!invoiceSync.synced) {
+        setSyncStatus('error');
+        alert(canonicalSyncFailureMessage('Invoice payment status'));
+        return false;
+      }
+    }
+    setPayments(newPayments);
+    const paymentSync = await dbService.savePayments(user.username, newPayments);
+    if (!paymentSync.synced) {
+      setSyncStatus('error');
+      alert(canonicalSyncFailureMessage('Payment'));
+      return false;
+    }
+    setSyncStatus('stable');
+    for (const np of brandNewPayments) {
+      const payClient = customerAccounts.find(c => c.id === np.clientId);
+      activityBridge.paymentRecorded(np.id, payClient?.company || np.clientId || 'Unknown', np.amount, np.method || 'other', user.username);
+    }
+    return true;
   };
   
-  const handleConvertToInvoice = () => {
-    if (items.length === 0 || !client.company) {
+  const handleConvertToInvoice = async () => {
+    if (!user || items.length === 0 || !client.company) {
         alert("Cannot create an invoice from an empty quote or without a client.");
         return;
     }
-    handleSaveToBook(client);
-    const clientAccount = customerAccounts.find(c => c.company === client.company);
+    let clientAccount = client.id ? customerAccounts.find(c => c.id === client.id) : customerAccounts.find(c => c.company.toLowerCase() === client.company.toLowerCase());
+    let updatedAccounts = customerAccounts;
+    if (!clientAccount) {
+      clientAccount = { ...client, id: client.id || `ACC-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}` };
+      updatedAccounts = [...customerAccounts, clientAccount];
+    }
+    setCustomerAccounts(updatedAccounts);
+    setClient(clientAccount);
+    setSyncStatus('syncing');
+    const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    if (!accountSync.synced) {
+      setSyncStatus('error');
+      alert(canonicalSyncFailureMessage('Customer required for the invoice'));
+      return;
+    }
+    setSyncStatus('stable');
     const serviceItems: ServiceItem[] = items.map((q, idx) => {
       const markedUpPrice = q.unitPrice * (1 + (config.markupPercentage / 100));
       const roundedRate = Math.round(markedUpPrice * 100) / 100;
@@ -719,14 +859,14 @@ const App: React.FC = () => {
         id: generateDocumentId(true),
         date: new Date().toISOString().split('T')[0],
         dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        clientId: clientAccount?.id || '', items: serviceItems, taxRate: 7,
+        clientId: clientAccount.id, items: serviceItems, taxRate: 7,
         discount: config.creditOrRefund || 0, notes: config.specialInstructions || '',
         status: 'draft', total: 0
     };
     setInitialInvoiceData(newInvoice);
     setActiveSystem('invoicing');
     const total = serviceItems.reduce((sum, si) => sum + (si.hours * si.rate), 0);
-    activityBridge.invoiceConverted(config.quoteId, newInvoice.id, client.company || 'N/A', total, user!.username);
+    activityBridge.invoiceConverted(config.quoteId, newInvoice.id, client.company || 'N/A', total, user.username);
   };
 
   const handleNewDocumentForCustomer = (customerId: string, type: 'quote' | 'invoice') => {
@@ -750,21 +890,51 @@ const App: React.FC = () => {
   };
 
   const handleCommitToCloud = async () => {
-    if (!user || items.length === 0) return;
+    if (!user || items.length === 0) return false;
+    const company = client.company.trim() || client.contactName.trim();
+    if (!company) {
+      alert('Add a customer company or contact before saving this quote.');
+      return false;
+    }
     setSyncStatus('syncing');
     try {
-      const total = items.reduce((sum, i) => sum + (i.qty * i.unitPrice), 0);
-      const newSavedQuote = await dbService.saveQuote(user.username, {
+      const existingAccount = client.id
+        ? customerAccounts.find(account => account.id === client.id)
+        : customerAccounts.find(account => account.company.toLowerCase() === company.toLowerCase());
+      const customer: CustomerAccount = existingAccount
+        ? { ...existingAccount, ...client, id: existingAccount.id, company }
+        : { ...client, id: `ACC-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`, company };
+      const updatedAccounts = existingAccount
+        ? customerAccounts.map(account => account.id === existingAccount.id ? customer : account)
+        : [...customerAccounts, customer];
+      setCustomerAccounts(updatedAccounts);
+      setClient(customer);
+      const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+      if (!accountSync.synced) {
+        setSyncStatus('error');
+        alert(canonicalSyncFailureMessage('Customer required for the quote'));
+        return false;
+      }
+      const total = calculateQuoteFinancials(items, config).total;
+      const { quote: newSavedQuote, sync } = await dbService.saveQuote(user.username, {
         title: `${client.company || 'Entity'} - ${config.quoteId}`,
-        total, payload: { items, client, config, aiAnalysis }
+        total, payload: { items, client: customer, config, aiAnalysis }
       });
       setQuoteHistory(prev => [newSavedQuote, ...prev]);
+      if (!sync.synced) {
+        setSyncStatus('error');
+        alert(canonicalSyncFailureMessage('Quote'));
+        return false;
+      }
       setSyncStatus('stable');
-      activityBridge.quoteSaved(config.quoteId, client.company || client.contactName || 'N/A', user.username);
+      activityBridge.quoteSaved(config.quoteId, customer.company || customer.contactName || 'N/A', user.username);
       activityBridge.cloudSynced(user.username);
       alert("Saved to Archive.");
+      return true;
     } catch (e) {
       setSyncStatus('error');
+      alert('Quote could not be saved. Please retry after Live Sync reconnects.');
+      return false;
     }
   };
 
@@ -842,8 +1012,9 @@ const App: React.FC = () => {
     reader.readAsText(file);
   };
 
-  const handleSendInvoice = (invoice: InvoiceData) => {
+  const handleSendInvoice = (invoice: InvoiceData, paymentUrl?: string) => {
     setInvoiceToSend(invoice);
+    setInvoicePaymentLink(paymentUrl || null);
     setIsEmailOpen(true);
   };
 
@@ -929,6 +1100,7 @@ const App: React.FC = () => {
           success: false,
           timestamp: new Date().toISOString(),
           accounts: { pushed: 0, failed: 0 },
+          quotes: { pushed: 0, failed: 0 },
           invoices: { pushed: 0, failed: 0 },
           inventory: { pushed: 0, failed: 0 },
           payments: { pushed: 0, failed: 0 },
@@ -947,6 +1119,7 @@ const App: React.FC = () => {
         success: false,
         timestamp: new Date().toISOString(),
         accounts: { pushed: 0, failed: 0 },
+        quotes: { pushed: 0, failed: 0 },
         invoices: { pushed: 0, failed: 0 },
         inventory: { pushed: 0, failed: 0 },
         payments: { pushed: 0, failed: 0 },
@@ -958,7 +1131,7 @@ const App: React.FC = () => {
   };
 
   const handleImportData = (file: File) => {
-    if (!user || !window.confirm("This will overwrite all current data. This action cannot be undone. Are you sure?")) return;
+    if (!user || !window.confirm("This merges valid backup records into IronSuite. It does not delete existing canonical Suite records. Continue?")) return;
     const reader = new FileReader();
     reader.onload = async (event) => {
         try {
@@ -967,7 +1140,7 @@ const App: React.FC = () => {
             if (typeof importedData !== 'object' || importedData === null || !importedData.accounts) throw new Error("Invalid backup file.");
             
             setSyncStatus('syncing');
-            await dbService.importAllUserData(user.username, importedData);
+            const importResult = await dbService.importAllUserData(user.username, importedData);
             
             // Update ALL local state immediately so the user sees the changes without needing a full reload
             if (importedData.accounts) setCustomerAccounts(importedData.accounts);
@@ -978,9 +1151,23 @@ const App: React.FC = () => {
             if (importedData.templates) setTemplates(importedData.templates);
             if (importedData.inventory) setInventory(importedData.inventory);
             
+            if (!importResult.synced || !importResult.cached) {
+              setSyncStatus('error');
+              const details = [
+                importResult.unsynchronizedStores.length
+                  ? `Suite did not confirm: ${importResult.unsynchronizedStores.join(', ')}`
+                  : '',
+                importResult.failedStores.length
+                  ? `Local cache failed: ${importResult.failedStores.join(', ')}`
+                  : '',
+              ].filter(Boolean).join('. ');
+              alert(`Import is visible in this Hub session, but it is not fully synchronized. ${details}`);
+              return;
+            }
+
             setSyncStatus('stable');
             activityBridge.dataImported(user.username);
-            alert("Import successful!");
+            alert("Import synchronized with IronSuite.");
 
             // We still reload to ensure all subsystems (like inventory) catch the new data
             // but the state update above makes it feel more responsive.
@@ -993,8 +1180,29 @@ const App: React.FC = () => {
     reader.readAsText(file);
   };
 
+  if (authenticationState === 'loading') {
+    return <LoadingScreen message="Loading secure IronSuite session..." />;
+  }
+
   if (!user) {
-    return <Login onLogin={login} />;
+    return (
+      <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 text-center">
+        <div className="max-w-md space-y-6">
+          <Logo className="h-20 w-auto mx-auto" />
+          <h1 className="text-2xl font-black uppercase text-white">Secure workspace unavailable</h1>
+          <p className="text-sm leading-relaxed text-slate-300">
+            Open Iron Hub Pro from your signed-in IronSuite workspace. No separate Hub password is accepted.
+          </p>
+          <button
+            type="button"
+            onClick={retryAuthentication}
+            className="px-6 py-3 bg-cat-yellow text-cat-black rounded-xl font-black text-xs uppercase tracking-widest"
+          >
+            Retry secure connection
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const generatePdf = async () => {
@@ -1006,22 +1214,22 @@ const App: React.FC = () => {
     document.body.classList.add('pdf-generation-mode-active');
     
     const opt = {
-      margin:       [0.25, 0.5, 0.85, 0.5] as [number, number, number, number], // top, right, bottom (room for footer), left — matches @page
+      margin:       [0.35, 0.42, 0.35, 0.42] as [number, number, number, number],
       filename:     `${config.quoteId || 'Document'}.pdf`,
       image:        { type: 'jpeg' as const, quality: 0.98 },
       html2canvas:  { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },
       jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' as const },
       pagebreak:    {
-        mode:  ['avoid-all', 'css', 'legacy'],
-        avoid: ['tr', 'td', 'th', '.address-block', '.totals-container', '.totals-container-print', '.terms-box', '.summary-table', '.receipt-header', '.invoice-print-footer', '.ai-analysis-box']
+        mode:  ['css', 'legacy'],
+        avoid: ['tr', 'thead', '.address-block', '.summary-table', '.receipt-header']
       }
     };
     
     try {
+      const { default: html2pdf } = await import('html2pdf.js');
       const pdfBase64 = await html2pdf().from(element).set(opt).outputPdf('datauristring');
       return pdfBase64;
-    } catch (err) {
-      console.error("PDF Generation Error:", err);
+    } catch {
       return null;
     } finally {
       element.classList.remove('pdf-generation-mode');
@@ -1038,20 +1246,19 @@ const App: React.FC = () => {
               itemsCount={items.length} onDataLoaded={handleDataLoaded}
               onConfigChange={setConfig} onClientChange={setClient}
               onAnalyze={handleAnalyze} onSaveQuote={handleSaveQuote}
-              onLoadQuote={handleLoadLocalQuote} onSaveDraft={() => {}}
-              onResumeDraft={() => {}} onCommitToCloud={handleCommitToCloud}
+              onLoadQuote={handleLoadLocalQuote} onCommitToCloud={handleCommitToCloud}
               onPrint={() => { window.print(); activityBridge.quotePrinted(config.quoteId, user.username); }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
               onConvertToInvoice={handleConvertToInvoice} onGenerateAllImages={handleGenerateAllImages}
               onExportData={handleExportData} onImportData={handleImportData}
               onDownloadImagePool={handleDownloadImagePool}
-              hasDraft={hasDraft} isAnalyzing={isAnalyzing}
+              isAnalyzing={isAnalyzing}
               isGeneratingImages={isGeneratingImages} config={config}
               client={client} customLogo={customLogo} onLogoUpload={setCustomLogo}
               onRefreshId={() => setConfig(prev => ({ ...prev, quoteId: generateDocumentId(prev.isInvoice) }))}
               addressBook={customerAccounts} onSaveToBook={handleSaveToBook}
               onDeleteFromBook={handleDeleteFromBook} quoteHistory={quoteHistory}
-              onLoadFromArchive={handleLoadFromArchive} onDeleteFromArchive={() => {}}
-              currentUser={user} onLogout={handleLogout} syncStatus={syncStatus}
+              onLoadFromArchive={handleLoadFromArchive}
+              currentUser={user} syncStatus={syncStatus}
             />
             <div className="no-print">{items.length > 0 && <ItemEditor items={items} onUpdate={setItems} config={config} onDeleteItem={(idx) => setItems(prev => prev.filter((_, i) => i !== idx))} currentUser={user} />}</div>
             <div ref={resultRef} className="quote-preview-container printable-area">
@@ -1097,7 +1304,7 @@ const App: React.FC = () => {
             </div>
           </>
         );
-      case 'invoicing': return <InvoiceSystem initialInvoice={initialInvoiceData} onClearInitialInvoice={() => setInitialInvoiceData(null)} currentUser={user} syncStatus={syncStatus} onLogout={handleLogout} customerAccounts={customerAccounts} allInvoices={invoices} onSaveInvoices={handleSaveInvoices} customLogo={customLogo} onSendInvoice={handleSendInvoice} templates={templates} onSaveTemplates={handleSaveTemplates} recurringInvoices={recurringInvoices} onSaveRecurring={handleSaveRecurring} />;
+      case 'invoicing': return <InvoiceSystem initialInvoice={initialInvoiceData} onClearInitialInvoice={() => setInitialInvoiceData(null)} currentUser={user} syncStatus={syncStatus} customerAccounts={customerAccounts} allInvoices={invoices} onSaveInvoices={handleSaveInvoices} customLogo={customLogo} onSendInvoice={handleSendInvoice} templates={templates} onSaveTemplates={handleSaveTemplates} recurringInvoices={recurringInvoices} onSaveRecurring={handleSaveRecurring} />;
       case 'accounts': return <AccountsSystem currentUser={user} accounts={customerAccounts} invoices={invoices} payments={payments} quoteHistory={quoteHistory} onSavePayments={handlePaymentsUpdate} onSaveAccounts={handleSaveAccounts} onDeleteAccount={handleDeleteAccount} onNewDocument={handleNewDocumentForCustomer}/>;
       case 'inventory': return <InventorySystem currentUser={user} />;
       case 'dashboard': return <Dashboard invoices={invoices} quotes={quoteHistory} accounts={customerAccounts} payments={payments} inventory={inventory} onNavigateToQuoting={() => setActiveSystem('quoting')} onDataLoaded={(newItems) => { handleDataLoaded(newItems); setActiveSystem('quoting'); }} />;
@@ -1176,29 +1383,21 @@ const App: React.FC = () => {
                 <p className="text-[11px] font-black text-cat-black uppercase tracking-[0.2em] leading-tight">{user.displayName}</p>
                 <p className="text-[9px] font-bold text-slate-500 uppercase tracking-[0.2em] leading-tight mt-1">{user.role}</p>
               </div>
-              <div className="w-[1px] h-6 bg-slate-200 mx-1"></div>
-              <button 
-                onClick={handleLogout}
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
-                title="Secure Logout"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-              </button>
             </div>
           </div>
         </div>
         <div className="pt-28 min-h-screen pb-20 print:min-h-0 print:pb-0 print:pt-0 print:bg-white fade-in">
-          <Suspense fallback={<LoadingScreen message={`Loading ${activeSystem} module...`} />}>
-            {renderActiveSystem()}
-          </Suspense>
+          {renderActiveSystem()}
           <EmailModule
             isOpen={isEmailOpen}
             onClose={() => {
               setIsEmailOpen(false);
-              setInvoiceToSend(null); // Clear the invoice to send
+              setInvoiceToSend(null);
+              setInvoicePaymentLink(null);
             }}
             client={invoiceToSend ? customerAccounts.find(c => c.id === invoiceToSend.clientId) || client : client}
             invoice={invoiceToSend}
+            paymentUrl={invoiceToSend ? invoicePaymentLink : null}
             config={config}
             items={items}
             generatePdf={generatePdf}
@@ -1254,7 +1453,7 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <p className="text-[10px] font-bold text-emerald-700 leading-relaxed mb-3">
-                    Pushes all accounts, invoices, inventory, and payments directly to Iron Hub Suite via the bridge API.
+                    Reconciles accounts, quotes, invoices, inventory, and payments directly with the authenticated IronSuite workspace.
                   </p>
 
                   {/* Progress bar */}
@@ -1279,6 +1478,7 @@ const App: React.FC = () => {
                       </p>
                       <div className="grid grid-cols-2 gap-1 mt-2">
                         <span className="text-[9px] font-bold text-slate-600">Accounts: {bridgeSyncResult.accounts.pushed} pushed</span>
+                        <span className="text-[9px] font-bold text-slate-600">Quotes: {bridgeSyncResult.quotes.pushed} pushed</span>
                         <span className="text-[9px] font-bold text-slate-600">Invoices: {bridgeSyncResult.invoices.pushed} pushed</span>
                         <span className="text-[9px] font-bold text-slate-600">Inventory: {bridgeSyncResult.inventory.pushed} pushed</span>
                         <span className="text-[9px] font-bold text-slate-600">Payments: {bridgeSyncResult.payments.pushed} pushed</span>
