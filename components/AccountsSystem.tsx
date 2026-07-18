@@ -3,8 +3,24 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { User, CustomerAccount, InvoiceData, Payment, SavedQuote } from '../types.ts';
 import { PaymentReceipt } from './PaymentReceipt.tsx';
 import { exportContacts } from '../services/exportService.ts';
+import { readSpreadsheetRows } from '../services/spreadsheetService.ts';
 import { Download, FileSpreadsheet, FileText, RefreshCw } from 'lucide-react';
-import html2pdf from 'html2pdf.js';
+
+type EmailDispatchResult = {
+  success?: boolean;
+  error?: string;
+  details?: string;
+};
+
+async function readEmailDispatchResult(response: Response): Promise<EmailDispatchResult> {
+  const raw = await response.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as EmailDispatchResult;
+  } catch {
+    return { error: `Email service returned HTTP ${response.status}` };
+  }
+}
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -68,9 +84,9 @@ interface AccountsSystemProps {
     invoices: InvoiceData[];
     payments: Payment[];
     quoteHistory: SavedQuote[];
-    onSavePayments: (payments: Payment[]) => void;
-    onSaveAccounts: (accounts: CustomerAccount[]) => Promise<void>;
-    onDeleteAccount: (accountId: string) => void;
+    onSavePayments: (payments: Payment[]) => Promise<boolean>;
+    onSaveAccounts: (accounts: CustomerAccount[]) => Promise<boolean>;
+    onDeleteAccount: (accountId: string) => Promise<boolean>;
     onNewDocument: (customerId: string, type: 'quote' | 'invoice') => void;
 }
 
@@ -117,10 +133,7 @@ const PaymentReceiptModal: React.FC<{
     try {
       window.focus();
       window.print();
-      if (window.self !== window.top) {
-        console.warn("Print triggered in iframe context.");
-      }
-    } catch (e) {
+    } catch {
       alert("Printing is restricted in this preview. Please press Ctrl+P or open in a new tab.");
     }
   };
@@ -136,12 +149,12 @@ const PaymentReceiptModal: React.FC<{
       image: { type: 'jpeg' as const, quality: 0.98 },
       html2canvas: { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },
       jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' as const },
-      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] as const, avoid: ['tr', '.receipt-header', '.summary-table'] },
+      pagebreak: { mode: ['css', 'legacy'] as const, avoid: ['tr', 'thead', '.receipt-header', '.summary-table'] },
     };
     try {
+      const { default: html2pdf } = await import('html2pdf.js');
       return await html2pdf().from(element).set(opt).outputPdf('datauristring');
-    } catch (err) {
-      console.error('Receipt PDF generation failed', err);
+    } catch {
       return null;
     } finally {
       element.classList.remove('pdf-generation-mode');
@@ -182,9 +195,10 @@ const PaymentReceiptModal: React.FC<{
           body,
           attachments: [{ filename: `Receipt-${payment.id}.pdf`, path: dataUri }],
         }),
+        signal: AbortSignal.timeout(90_000),
       });
-      const result = await res.json().catch(() => ({} as any));
-      if (!res.ok) throw new Error(result.details || result.error || `HTTP ${res.status}`);
+      const result = await readEmailDispatchResult(res);
+      if (!res.ok || result.success !== true) throw new Error(result.details || result.error || `HTTP ${res.status}`);
       setEmailStatus({ kind: 'ok', msg: `Sent to ${account.email}` });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -357,9 +371,9 @@ const CustomerProfile: React.FC<{
     invoices: InvoiceData[],
     payments: Payment[],
     quotes: SavedQuote[],
-    onSave: (updatedAccount: CustomerAccount) => void,
-    onDelete: () => void,
-    onAddPayment: (payment: Omit<Payment, 'id' | 'clientId'>) => void,
+    onSave: (updatedAccount: CustomerAccount) => Promise<void>,
+    onDelete: () => Promise<void>,
+    onAddPayment: (payment: Omit<Payment, 'id' | 'clientId'>) => Promise<void>,
     onNewDocument: (type: 'quote' | 'invoice') => void,
     onShowReceipt: (payment: Payment) => void,
 }> = ({ account, invoices, payments, quotes, onSave, onDelete, onAddPayment, onNewDocument, onShowReceipt }) => {
@@ -415,7 +429,7 @@ const CustomerProfile: React.FC<{
                       </div>
                     </div>
                     <div className="flex gap-3">
-                        <button onClick={onDelete} className="px-6 py-3.5 bg-red-50 text-red-600 font-black text-[10px] uppercase tracking-widest rounded-xl btn-app hover:bg-red-600 hover:text-white">Delete Account</button>
+                        <button onClick={() => { void onDelete(); }} title="Remove linked customer records in IronSuite" className="px-6 py-3.5 bg-amber-50 text-amber-700 font-black text-[10px] uppercase tracking-widest rounded-xl btn-app hover:bg-amber-600 hover:text-white">Manage in IronSuite</button>
                         <button onClick={handleSave} className="px-8 py-3.5 bg-cat-black text-white font-black text-[10px] uppercase tracking-widest rounded-xl btn-app hover:bg-cat-dark shadow-xl shadow-cat-black/10">Save Changes</button>
                     </div>
                 </div>
@@ -516,15 +530,16 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
     const [syncMessage, setSyncMessage] = useState<{type: 'success' | 'error', text: string} | null>(null);
     
     const handleSyncCRM = async () => {
-        // TODO: re-wire to authenticated POST /api/crm/sync once Round 3 auth lands.
-        // Previously POSTed full account list (PII) to https://iron-hub-suite.replit.app/api/sync
-        // with no authentication and a wide-open CORS policy. Removed in C-4.
         setIsSyncing(true);
-        setSyncMessage({ type: 'error', text: 'CRM sync is temporarily unavailable while authentication is being upgraded. Use Import/Export for now.' });
-        setTimeout(() => {
+        setSyncMessage(null);
+        try {
+            const synchronized = await onSaveAccounts(accounts);
+            setSyncMessage(synchronized
+                ? { type: 'success', text: 'Customer directory is synchronized with IronSuite.' }
+                : { type: 'error', text: 'Live Sync could not confirm the customer directory. The local outbox will retry when the connection returns.' });
+        } finally {
             setIsSyncing(false);
-            setSyncMessage(null);
-        }, 4000);
+        }
     };
 
     const selectedAccount = useMemo(() => {
@@ -545,15 +560,7 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
 
     const handleFileImport = async (file: File) => {
         try {
-            const data = await file.arrayBuffer();
-            const workbook = window.XLSX.read(data, { type: 'array' });
-
-            const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-            if (!worksheet) {
-                throw new Error("No valid sheet found in the file.");
-            }
-            
-            const jsonData: any[] = window.XLSX.utils.sheet_to_json(worksheet);
+            const jsonData = await readSpreadsheetRows(file);
 
             if (jsonData.length === 0) {
                 alert("Import failed: The file appears to be empty or has no data rows.");
@@ -662,31 +669,31 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
                 return;
             }
 
-            await onSaveAccounts(updatedAccounts);
+            const synchronized = await onSaveAccounts(updatedAccounts);
+            if (!synchronized) return;
             alert(`Import complete! ${newAccountsCount} new accounts added and ${updatedAccountsCount} updated. Directory has been synchronized to the permanent database.`);
             setIsImportModalOpen(false);
         } catch (error) {
-            console.error("Import failed:", error);
             alert(`File import failed. ${error instanceof Error ? error.message : 'Please check the file format and column headers.'}`);
         }
     };
 
-    const handleSaveAccount = (updatedAccount: CustomerAccount) => {
+    const handleSaveAccount = async (updatedAccount: CustomerAccount) => {
         const updatedAccounts = accounts.map(acc => acc.id === updatedAccount.id ? updatedAccount : acc);
-        onSaveAccounts(updatedAccounts);
+        await onSaveAccounts(updatedAccounts);
     };
 
-    const handleAddPaymentForAccount = (payment: Omit<Payment, 'id' | 'clientId'>) => {
+    const handleAddPaymentForAccount = async (payment: Omit<Payment, 'id' | 'clientId'>) => {
         if (!selectedAccount) return;
         const newPayment: Payment = {
             id: `PAY-${Date.now()}`,
             clientId: selectedAccount.id,
             ...payment
         };
-        onSavePayments([...payments, newPayment]);
+        await onSavePayments([...payments, newPayment]);
     };
     
-    const handleAddNewAccount = () => {
+    const handleAddNewAccount = async () => {
         const newAccount: CustomerAccount = {
             id: `ACC-${Date.now()}`,
             company: 'New Enterprise',
@@ -695,13 +702,13 @@ export const AccountsSystem: React.FC<AccountsSystemProps> = ({ currentUser, acc
             shippingAddress: '', shippingCity: '', shippingState: '', shippingZip: '', shippingCountry: 'United States',
             internalNotes: ''
         };
-        onSaveAccounts([...accounts, newAccount]);
-        setSelectedAccountId(newAccount.id);
+        if (await onSaveAccounts([...accounts, newAccount])) {
+            setSelectedAccountId(newAccount.id);
+        }
     };
 
-    const handleDelete = () => {
-        if (selectedAccountId) {
-            onDeleteAccount(selectedAccountId);
+    const handleDelete = async () => {
+        if (selectedAccountId && await onDeleteAccount(selectedAccountId)) {
             setSelectedAccountId(null);
         }
     };

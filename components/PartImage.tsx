@@ -48,8 +48,7 @@ export const PartImage: React.FC<PartImageProps> = ({ partNo, photoMode, origina
       const blob = new Blob([ab], { type: mimeString });
       newObjectUrl = URL.createObjectURL(blob);
       setObjectUrl(newObjectUrl);
-    } catch (e) {
-      console.error("Failed to create object URL from base64", e);
+    } catch {
       setObjectUrl(currentImageUrl); // Fallback to base64 on error
     }
     

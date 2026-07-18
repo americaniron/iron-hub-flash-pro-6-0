@@ -2,9 +2,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AppConfig, ClientInfo, ParseMode, QuoteItem, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus } from '../types.ts';
 import { parseTextData, parsePdfFile, parseExcelFile } from '../services/parserService.ts';
-import { performIntelligentTask } from '../services/claudeService.ts';
+import { performIntelligentTask, transcribeAudio } from '../services/claudeService.ts';
 import { Logo } from './Logo.tsx';
-import { Country, City } from 'country-state-city';
+import { COUNTRY_OPTIONS, normalizeCountryCode } from '../services/countryOptions.ts';
+import { Languages, Mic, Square } from 'lucide-react';
 
 // --- High-Fidelity UI Components ---
 
@@ -105,8 +106,6 @@ interface ConfigPanelProps {
   onAnalyze: (thinking?: boolean) => void;
   onSaveQuote: () => void;
   onLoadQuote: (file: File) => void;
-  onSaveDraft: (options: any) => void;
-  onResumeDraft: () => void;
   onCommitToCloud: () => void;
   onPrint: () => void;
   onEmailDispatch: () => void;
@@ -116,7 +115,6 @@ interface ConfigPanelProps {
   onExportData: () => void;
   onDownloadImagePool: () => void;
   onImportData: (file: File) => void;
-  hasDraft: boolean;
   isAnalyzing: boolean;
   isGeneratingImages: boolean;
   config: AppConfig;
@@ -125,13 +123,11 @@ interface ConfigPanelProps {
   onLogoUpload: (logo: string) => void;
   onRefreshId?: () => void;
   addressBook: CustomerAccount[];
-  onSaveToBook: (client: ClientInfo) => void;
-  onDeleteFromBook: (id: string) => void;
+  onSaveToBook: (client: ClientInfo) => Promise<boolean>;
+  onDeleteFromBook: (id: string) => Promise<boolean>;
   quoteHistory: SavedQuote[];
   onLoadFromArchive: (quote: SavedQuote) => void;
-  onDeleteFromArchive: (id: string) => void;
   currentUser: User;
-  onLogout: () => void;
   syncStatus: SyncStatus;
 }
 
@@ -155,6 +151,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [activeTab, setActiveTab] = useState<ParseMode>(ParseMode.PDF);
   const [textInput, setTextInput] = useState("");
   const [status, setStatus] = useState("Idle");
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [showAddressBook, setShowAddressBook] = useState(false);
   const [bookSearch, setBookSearch] = useState("");
   const [useThinking, setUseThinking] = useState(false);
@@ -163,10 +160,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [isIntelWorking, setIsIntelWorking] = useState(false);
   const [shippingSameAsBilling, setShippingSameAsBilling] = useState(true);
   const [isSavedToBook, setIsSavedToBook] = useState(false);
+  const [isSavingToBook, setIsSavingToBook] = useState(false);
+  const [voiceLanguage, setVoiceLanguage] = useState<'en' | 'ar'>('en');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
 
-  const countryOptions = Country.getAllCountries().map(c => ({ value: c.isoCode, label: c.name }));
-  const billingCityOptions = props.client.billingCountry ? City.getCitiesOfCountry(props.client.billingCountry)?.map(c => ({ value: c.name, label: c.name })) || [] : [];
-  const shippingCityOptions = props.client.shippingCountry ? City.getCitiesOfCountry(props.client.shippingCountry)?.map(c => ({ value: c.name, label: c.name })) || [] : [];
+  const billingCountry = normalizeCountryCode(props.client.billingCountry);
+  const shippingCountry = normalizeCountryCode(props.client.shippingCountry);
 
   useEffect(() => {
     if (shippingSameAsBilling) {
@@ -186,6 +186,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const logoInputRef = useRef<HTMLInputElement>(null);
   const localLoadInputRef = useRef<HTMLInputElement>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<BlobPart[]>([]);
+
+  const stopMicrophone = () => {
+    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+    microphoneStreamRef.current = null;
+  };
+
+  useEffect(() => () => {
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+    stopMicrophone();
+  }, []);
 
   const handleLogoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -216,16 +229,84 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
     }
   };
 
-  const handleSaveToDirectory = () => {
-    if (props.client.company) {
-      props.onSaveToBook(props.client);
+  const handleSaveToDirectory = async () => {
+    if (!props.client.company || isSavingToBook) return;
+    setIsSavingToBook(true);
+    try {
+      const saved = await props.onSaveToBook(props.client);
+      if (!saved) return;
       setIsSavedToBook(true);
-      setTimeout(() => setIsSavedToBook(false), 2000);
+      window.setTimeout(() => setIsSavedToBook(false), 2000);
+    } finally {
+      setIsSavingToBook(false);
+    }
+  };
+
+  const handleVoiceRecording = async () => {
+    if (isTranscribing) return;
+    setStatusError(null);
+    if (isRecording && recorderRef.current) {
+      setStatus('Transcribing');
+      recorderRef.current.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setStatus('Error');
+      setStatusError('Voice recording is not supported by this browser. Use a current desktop browser and allow microphone access.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      microphoneStreamRef.current = stream;
+      const preferredMime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+      const recorder = preferredMime ? new MediaRecorder(stream, { mimeType: preferredMime }) : new MediaRecorder(stream);
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        void (async () => {
+          setIsTranscribing(true);
+          try {
+            const audio = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+            const transcript = await transcribeAudio(audio, voiceLanguage);
+            setTextInput(transcript.text);
+            setActiveTab(ParseMode.PASTE);
+            setStatus('Complete');
+          } catch (error) {
+            setStatus('Error');
+            setStatusError(error instanceof Error ? error.message : 'Voice transcription could not be completed. Please try again.');
+          } finally {
+            recorderRef.current = null;
+            recordingChunksRef.current = [];
+            stopMicrophone();
+            setIsTranscribing(false);
+          }
+        })();
+      };
+      recorder.onerror = () => {
+        setStatus('Error');
+        setStatusError('The browser could not finish this voice recording. Please try again.');
+        stopMicrophone();
+        setIsRecording(false);
+      };
+      recorderRef.current = recorder;
+      recorder.start(1_000);
+      setStatus('Recording');
+      setIsRecording(true);
+    } catch (error) {
+      stopMicrophone();
+      setStatus('Error');
+      setStatusError('Microphone access was denied or is unavailable. Allow microphone access, then retry.');
     }
   };
 
   const handleProcess = async (file?: File) => {
     setStatus("Processing");
+    setStatusError(null);
     try {
         if (activeTab === ParseMode.PASTE) {
             const items = parseTextData(textInput);
@@ -245,10 +326,24 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         }
         setStatus("Complete");
     } catch (err) {
-        console.error("Parsing Error:", err);
         setStatus("Error");
+        setStatusError(err instanceof Error ? err.message : 'The manifest could not be processed. Check the file and retry.');
     } finally {
         setTimeout(() => setStatus("Idle"), 3000);
+    }
+  };
+
+  const handleIntelligentTask = async () => {
+    const prompt = intelTask.trim();
+    if (!prompt || isIntelWorking) return;
+    setIsIntelWorking(true);
+    setIntelResult('');
+    try {
+      setIntelResult(await performIntelligentTask(prompt));
+    } catch (error) {
+      setIntelResult(error instanceof Error ? error.message : 'The AI task could not be completed. Please try again.');
+    } finally {
+      setIsIntelWorking(false);
     }
   };
 
@@ -304,9 +399,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
           <div>
             <h1 className="text-lg font-black uppercase tracking-tight text-cat-black leading-tight">Iron Hub Portal</h1>
             <div className="flex items-center gap-2 mt-1">
-              <div className={`w-2.5 h-2.5 rounded-full ${props.syncStatus === 'stable' ? 'bg-emerald-500' : 'bg-cat-yellow animate-pulse'}`}></div>
+              <div className={`w-2.5 h-2.5 rounded-full ${props.syncStatus === 'stable' ? 'bg-emerald-500' : props.syncStatus === 'error' ? 'bg-red-500' : 'bg-cat-yellow animate-pulse'}`}></div>
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                {props.syncStatus === 'stable' ? 'Cloud Synced' : 'Syncing...'}
+                {props.syncStatus === 'stable' ? 'Cloud Synced' : props.syncStatus === 'error' ? 'Sync unavailable' : 'Syncing...'}
               </span>
             </div>
           </div>
@@ -330,13 +425,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
           <div className="card-app p-6 border-l-4 border-l-cat-black">
             <SectionTitle title="Intake Center" subtitle="Manifest synchronization" />
             <div className="flex gap-2 p-1 bg-slate-100 rounded-xl mb-6">
-              {[ParseMode.PDF, ParseMode.EXCEL, ParseMode.PASTE].map(mode => (
+              {[ParseMode.PDF, ParseMode.EXCEL, ParseMode.PASTE, ParseMode.VOICE].map(mode => (
                 <button 
                   key={mode} 
                   onClick={() => setActiveTab(mode)} 
                   className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === mode ? 'bg-white text-cat-black shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
                 >
-                  {mode}
+                  {mode === ParseMode.VOICE ? 'Voice' : mode}
                 </button>
               ))}
             </div>
@@ -349,6 +444,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                   className="w-full h-40 p-4 bg-slate-50 rounded-xl text-xs font-mono border-2 border-slate-200 text-slate-900 placeholder:text-slate-400 focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/10 focus:border-cat-yellow transition-all resize-none" 
                   placeholder="Enter manifest strings..." 
                 />
+              ) : activeTab === ParseMode.VOICE ? (
+                <div className="w-full h-40 bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center gap-4">
+                  <div className="flex items-center gap-2 text-slate-500">
+                    <Languages className="w-4 h-4" aria-hidden="true" />
+                    <button type="button" onClick={() => setVoiceLanguage('en')} className={`px-3 py-1.5 text-[10px] font-black uppercase rounded-lg transition-colors ${voiceLanguage === 'en' ? 'bg-cat-black text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>English</button>
+                    <button type="button" onClick={() => setVoiceLanguage('ar')} className={`px-3 py-1.5 text-[10px] font-black rounded-lg transition-colors ${voiceLanguage === 'ar' ? 'bg-cat-black text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>العربية</button>
+                  </div>
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${isRecording ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-white text-slate-400 shadow-sm'}`}>
+                    {isRecording ? <Square className="w-5 h-5" aria-hidden="true" /> : <Mic className="w-5 h-5" aria-hidden="true" />}
+                  </div>
+                </div>
               ) : (
                 <div 
                   onClick={() => activeTab === ParseMode.PDF ? pdfInputRef.current?.click() : excelInputRef.current?.click()} 
@@ -368,21 +474,37 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
             </div>
 
             <button 
-              onClick={() => handleProcess()} 
-              className="w-full py-4 bg-cat-black text-white font-black text-[11px] uppercase tracking-[0.2em] rounded-xl hover:bg-cat-dark btn-app shadow-lg shadow-cat-black/10"
+              onClick={() => { if (activeTab === ParseMode.VOICE) void handleVoiceRecording(); else void handleProcess(); }}
+              disabled={status === 'Processing' || isTranscribing}
+              className="w-full py-4 bg-cat-black text-white font-black text-[11px] uppercase tracking-[0.2em] rounded-xl hover:bg-cat-dark btn-app shadow-lg shadow-cat-black/10 disabled:opacity-60"
             >
-              {status === "Processing" ? (
+              {isTranscribing ? (
+                <div className="flex items-center justify-center gap-2">
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Transcribing...</span>
+                </div>
+              ) : activeTab === ParseMode.VOICE ? (
+                <div className="flex items-center justify-center gap-2">
+                  {isRecording ? <Square className="w-4 h-4" aria-hidden="true" /> : <Mic className="w-4 h-4" aria-hidden="true" />}
+                  <span>{isRecording ? 'Stop Recording' : 'Start Recording'}</span>
+                </div>
+              ) : status === "Processing" ? (
                 <div className="flex items-center justify-center gap-2">
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   <span>Syncing Data...</span>
                 </div>
               ) : "Process Manifest"}
             </button>
+            {statusError && (
+              <p role="alert" className="mt-3 text-[10px] font-bold leading-relaxed text-red-600">
+                {statusError}
+              </p>
+            )}
           </div>
 
           <div className="card-app p-6 bg-cat-yellow text-cat-black border-none shadow-xl shadow-cat-yellow/10">
             <div className="flex justify-between items-center mb-6">
-              <SectionTitle title="Smart Analytics" subtitle="Thinking mode enabled" colorClass="text-cat-black" />
+              <SectionTitle title="Smart Analytics" subtitle={useThinking ? "Extended reasoning enabled" : "Standard quote analysis"} colorClass="text-cat-black" />
               <Switch enabled={useThinking} onChange={setUseThinking} />
             </div>
             <div className="space-y-4">
@@ -393,7 +515,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                 placeholder="Command AI Engine..." 
               />
               <button 
-                disabled={isIntelWorking} 
+                type="button"
+                onClick={() => { void handleIntelligentTask(); }}
+                disabled={isIntelWorking || !intelTask.trim()}
                 className="w-full py-4 bg-cat-black text-white font-black text-[10px] uppercase tracking-widest rounded-xl btn-app shadow-lg"
               >
                 {isIntelWorking ? (
@@ -419,10 +543,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
               <div className="flex gap-2">
                 <button 
                   onClick={handleSaveToDirectory} 
-                  disabled={!props.client.company || isSavedToBook}
+                  disabled={!props.client.company || isSavedToBook || isSavingToBook}
                   className={`text-[9px] font-black uppercase px-4 py-2 rounded-lg btn-app transition-all disabled:opacity-50 ${isSavedToBook ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
-                  {isSavedToBook ? 'Saved ✓' : 'Save to Directory'}
+                  {isSavingToBook ? 'Saving...' : isSavedToBook ? 'Saved ✓' : 'Save to Directory'}
                 </button>
                 <button onClick={() => setShowAddressBook(true)} className="text-[9px] font-black uppercase text-cat-black bg-cat-yellow px-4 py-2 rounded-lg btn-app">Directory</button>
               </div>
@@ -459,23 +583,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                  <AppInput label="Address Line" className="md:col-span-2"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingAddress} onChange={(e) => props.onClientChange({...props.client, billingAddress: e.target.value})} /></AppInput>
                  <AppInput label="Country">
                    <CustomSelect
-                     value={props.client.billingCountry || ''}
+                     value={billingCountry}
                      onChange={(val) => props.onClientChange({...props.client, billingCountry: val, billingCity: ''})}
                      placeholder="Select Country..."
-                     options={countryOptions}
+                     options={COUNTRY_OPTIONS}
                    />
                  </AppInput>
                  <AppInput label="City">
-                   {billingCityOptions.length > 0 ? (
-                     <CustomSelect
-                       value={props.client.billingCity || ''}
-                       onChange={(val) => props.onClientChange({...props.client, billingCity: val})}
-                       placeholder="Select City..."
-                       options={billingCityOptions}
-                     />
-                   ) : (
-                     <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingCity} onChange={(e) => props.onClientChange({...props.client, billingCity: e.target.value})} />
-                   )}
+                   <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingCity} onChange={(e) => props.onClientChange({...props.client, billingCity: e.target.value})} />
                  </AppInput>
                  <AppInput label="State/Province"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingState} onChange={(e) => props.onClientChange({...props.client, billingState: e.target.value})} /></AppInput>
                  <AppInput label="ZIP/Postal Code"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.billingZip} onChange={(e) => props.onClientChange({...props.client, billingZip: e.target.value})} /></AppInput>
@@ -495,23 +610,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                   <AppInput label="Address Line" className="md:col-span-2"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingAddress} onChange={(e) => props.onClientChange({...props.client, shippingAddress: e.target.value})} /></AppInput>
                   <AppInput label="Country">
                     <CustomSelect
-                      value={props.client.shippingCountry || ''}
+                      value={shippingCountry}
                       onChange={(val) => props.onClientChange({...props.client, shippingCountry: val, shippingCity: ''})}
                       placeholder="Select Country..."
-                      options={countryOptions}
+                      options={COUNTRY_OPTIONS}
                     />
                   </AppInput>
                   <AppInput label="City">
-                    {shippingCityOptions.length > 0 ? (
-                      <CustomSelect
-                        value={props.client.shippingCity || ''}
-                        onChange={(val) => props.onClientChange({...props.client, shippingCity: val})}
-                        placeholder="Select City..."
-                        options={shippingCityOptions}
-                      />
-                    ) : (
-                      <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingCity} onChange={(e) => props.onClientChange({...props.client, shippingCity: e.target.value})} />
-                    )}
+                    <input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingCity} onChange={(e) => props.onClientChange({...props.client, shippingCity: e.target.value})} />
                   </AppInput>
                   <AppInput label="State/Province"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingState} onChange={(e) => props.onClientChange({...props.client, shippingState: e.target.value})} /></AppInput>
                   <AppInput label="ZIP/Postal Code"><input className="w-full h-[48px] px-4 bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 rounded-xl text-[13px] font-bold focus:bg-white outline-none focus:ring-4 focus:ring-cat-yellow/20 focus:border-cat-yellow transition-all shadow-sm hover:border-slate-300" value={props.client.shippingZip} onChange={(e) => props.onClientChange({...props.client, shippingZip: e.target.value})} /></AppInput>
@@ -744,7 +850,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                       <p className="text-[9px] text-slate-500 font-bold uppercase">{saved.contactName}</p>
                     </div>
                     <button 
-                      onClick={(e) => { e.stopPropagation(); props.onDeleteFromBook(saved.id); }}
+                      onClick={(e) => { e.stopPropagation(); void props.onDeleteFromBook(saved.id); }}
+                      title="Manage deletion in IronSuite"
                       className="p-2 text-slate-300 hover:text-red-500 transition-all opacity-0 group-hover/item:opacity-100"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>

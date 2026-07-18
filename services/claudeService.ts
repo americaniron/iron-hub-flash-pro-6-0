@@ -1,31 +1,18 @@
 /**
- * Claude AI Service — Replaces Gemini across all AI features
+ * Iron Hub AI service.
  *
- * Text AI:       Claude Sonnet 4.6 (analysis, translation, email, OCR, tasks)
+ * Text AI:       Worker-managed Claude with Cloudflare GPT fallback
  * Image Gen:     Claude API image generation tool
- * TTS:           ElevenLabs Multilingual v2
+ * Voice output:  Cloudflare Workers AI multilingual synthesis
  */
 
 import { QuoteItem, ClientInfo, AppConfig, EmailDraft, InvoiceData } from "../types.ts";
 
-const CLAUDE_TEXT_MODEL = 'claude-sonnet-4-6';
 const STANDARD_MAX_TOKENS = 2048;
 const THINKING_MAX_TOKENS = 16000;
 const THINKING_BUDGET_TOKENS = 10000;
-const GEMINI_FALLBACK_TEXT_MODEL = 'gemini-2.5-flash';
 
 const containsArabic = (text: string): boolean => /[\u0600-\u06FF]/.test(text);
-const isAnthropicAccessError = (error: any): boolean => {
-  const msg = (error?.message || String(error)).toLowerCase();
-  return (
-    msg.includes("anthropic") ||
-    msg.includes("credit balance") ||
-    msg.includes("purchase credits") ||
-    msg.includes("billing") ||
-    msg.includes("api key is not configured") ||
-    msg.includes("invalid")
-  );
-};
 
 // ─── Proxy helpers ───────────────────────────────────────────
 
@@ -43,6 +30,7 @@ async function callClaude(params: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
+    signal: AbortSignal.timeout(90_000),
   });
 
   if (!response.ok) {
@@ -53,61 +41,72 @@ async function callClaude(params: {
   return await response.json();
 }
 
-async function callElevenLabsTTS(text: string, voiceId?: string) {
+async function callVoiceSynthesis(text: string) {
   const response = await fetch("/api/elevenlabs-tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      text,
-      voice_id: voiceId || 'pNInz6obpgDQGcFmaJgB', // "Adam" voice
-    }),
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(60_000),
   });
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.details || errorData.error || `ElevenLabs proxy error (${response.status})`);
+    throw new Error(errorData.details || errorData.error || `Cloudflare voice synthesis error (${response.status})`);
   }
 
   return await response.json();
 }
 
-async function callGeminiText(prompt: string, maxOutputTokens: number = STANDARD_MAX_TOKENS): Promise<string> {
-  const response = await fetch("/api/gemini", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: GEMINI_FALLBACK_TEXT_MODEL,
-      contents: prompt,
-      config: {
-        temperature: 0.1,
-        maxOutputTokens,
-      },
-    }),
-  });
+export type TranscriptionLanguage = 'en' | 'ar';
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.details || errorData.error || `Gemini proxy error (${response.status})`);
+export async function transcribeAudio(audio: Blob, language: TranscriptionLanguage): Promise<{ text: string; model: string }> {
+  if (!(audio instanceof Blob) || audio.size === 0) {
+    throw new Error('Record audio before requesting a transcription.');
+  }
+  if (audio.size > 10 * 1024 * 1024) {
+    throw new Error('Recordings must be 10 MB or smaller.');
   }
 
-  const data = await response.json();
-  return data.text || data.candidates?.[0]?.content?.parts?.map((part: any) => part.text || '').join('') || '';
+  const bytes = new Uint8Array(await audio.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+
+  const response = await fetch('/api/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      audioBase64: btoa(binary),
+      language,
+      mimeType: audio.type || 'audio/webm',
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({})) as { error?: unknown; message?: unknown };
+    throw new Error(String(error.error || error.message || `Voice transcription failed (${response.status})`));
+  }
+  const body = await response.json() as { text?: unknown; model?: unknown };
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) throw new Error('Voice transcription returned no text.');
+  return { text, model: typeof body.model === 'string' ? body.model : 'Whisper' };
 }
 
 // ─── Error handling ──────────────────────────────────────────
 
 function handleAPIError(error: any): never {
-  console.error("AI Service Error:", error);
   const msg = error?.message || String(error);
 
   if (msg.includes("credit balance") || msg.includes("purchase credits") || msg.includes("billing")) {
-    throw new Error("Anthropic API billing credits are exhausted. Add credits in Anthropic Plans & Billing, then retry the quote analysis.");
+    throw new Error("Claude and the Cloudflare Workers AI fallback could not complete this request. Please retry shortly.");
   }
   if (msg.includes("401") || msg.includes("invalid") || msg.includes("not configured")) {
-    throw new Error("API key is not configured or invalid. Please ensure ANTHROPIC_API_KEY is set in the environment.");
+    throw new Error("The protected AI service is not configured or could not verify its server credentials.");
   }
   if (msg.includes("429") || msg.includes("rate") || msg.includes("quota")) {
-    throw new Error("API rate limit exceeded. Please try again in a moment.");
+    throw new Error("The AI providers are temporarily rate limited. Please try again in a moment.");
   }
   throw new Error(`AI Service Error: ${msg}`);
 }
@@ -177,7 +176,7 @@ function processImageQueue() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// EXPORTED FUNCTIONS — same signatures as old geminiService.ts
+// ─── Exported features ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -187,7 +186,6 @@ export const translateText = async (text: string, targetLanguage: 'en' | 'ar'): 
   return breaker.execute(async () => {
     const resp = await callClaude({
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: STANDARD_MAX_TOKENS,
       temperature: 0.1,
       messages: [{ role: 'user', content: `Translate the following text to ${targetLanguage === 'ar' ? 'Arabic' : 'English'}. Preserve the original tone and technical terminology. Return ONLY the translation, nothing else.\n\nText:\n${text}` }],
@@ -217,7 +215,6 @@ ${language === 'ar' ? 'IMPORTANT: Provide the entire analysis in ARABIC language
 
     const params: any = {
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: useThinking ? THINKING_MAX_TOKENS : 1024,
       messages: [{ role: 'user', content: prompt }],
     };
@@ -226,19 +223,15 @@ ${language === 'ar' ? 'IMPORTANT: Provide the entire analysis in ARABIC language
       params.thinking = { budget_tokens: THINKING_BUDGET_TOKENS };
     }
 
-    try {
-      const resp = await callClaude(params);
-      return resp.text || "Diagnostic analysis yielded no specific concerns.";
-    } catch (error) {
-      if (!isAnthropicAccessError(error)) throw error;
-      const fallbackText = await callGeminiText(prompt, 1024);
-      return fallbackText || "Diagnostic analysis yielded no specific concerns.";
-    }
+    // The authenticated Worker always tries Claude first and only falls back
+    // to Cloudflare's GPT model for supported Anthropic credit/rate failures.
+    const resp = await callClaude(params);
+    return resp.text || "Diagnostic analysis yielded no specific concerns.";
   }, () => "Diagnostic analysis is currently unavailable due to system load. Please proceed with standard manual review.");
 };
 
 /**
- * Generate speech audio using ElevenLabs TTS.
+ * Generate speech audio using Cloudflare Workers AI.
  * Supports English and Arabic via multilingual model.
  */
 export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): Promise<string | null> => {
@@ -248,25 +241,20 @@ export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): P
     // Translate to Arabic first if needed
     if (language === 'ar' && text && !containsArabic(text)) {
       const translationPrompt = `Translate the following quote-analysis brief to Arabic. Preserve heavy-equipment technical terms and return only the Arabic text.\n\nText:\n${text}`;
-      const translated = await callClaude({
-          action: 'text',
-          model: CLAUDE_TEXT_MODEL,
-          max_tokens: STANDARD_MAX_TOKENS,
-          temperature: 0.1,
-          messages: [{ role: 'user', content: translationPrompt }],
-        })
-        .then(resp => resp.text || text)
-        .catch(async (error) => {
-          if (!isAnthropicAccessError(error)) throw error;
-          return await callGeminiText(translationPrompt, STANDARD_MAX_TOKENS) || text;
-        });
+      const translatedResponse = await callClaude({
+        action: 'text',
+        max_tokens: STANDARD_MAX_TOKENS,
+        temperature: 0.1,
+        messages: [{ role: 'user', content: translationPrompt }],
+      });
+      const translated = translatedResponse.text || text;
 
       if (translated && translated !== text) {
         textToSpeak = translated;
       }
     }
 
-    const resp = await callElevenLabsTTS(textToSpeak);
+    const resp = await callVoiceSynthesis(textToSpeak);
     return resp.audioBase64 || null;
   }, () => null);
 };
@@ -280,7 +268,6 @@ export const editPartImage = async (base64Image: string, prompt: string): Promis
     const rawData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
     const analysisResp = await callClaude({
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: 512,
       messages: [{
         role: 'user',
@@ -342,7 +329,6 @@ export const analyzePartPhoto = async (base64Data: string, mimeType: string, use
 
     const params: any = {
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: useThinking ? THINKING_MAX_TOKENS : 1024,
       messages: [{
         role: 'user',
@@ -369,7 +355,6 @@ export const performIntelligentTask = async (prompt: string): Promise<string> =>
   return breaker.execute(async () => {
     const resp = await callClaude({
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: STANDARD_MAX_TOKENS,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -414,7 +399,6 @@ Return ONLY a valid JSON object with "to", "subject", and "body" fields. No mark
 
     const resp = await callClaude({
       action: 'text',
-      model: CLAUDE_TEXT_MODEL,
       max_tokens: 1024,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }],

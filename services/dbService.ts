@@ -16,17 +16,34 @@ const API_BASE = '/api/data';
 const API_STATUS = '/api/data-status';
 const DELAY = 0; // No artificial delay needed — server latency is real
 const DB_NAME = 'AmericanIronHubDB_V1';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAMES = ['accounts', 'quotes', 'invoices', 'payments', 'credits', 'drafts', 'recurring_invoices', 'templates', 'parts_image_pool', 'inventory'];
+const INTERNAL_STORE_NAMES = [...STORE_NAMES, 'sync_outbox'];
+const CANONICAL_STORES = new Set(['accounts', 'quotes', 'invoices', 'payments', 'inventory']);
+const CANONICAL_SYNC_BATCH_SIZE = 50;
+
+export type CloudWriteResult = {
+  synced: boolean;
+  cached: boolean;
+};
+
+export type DataImportResult = {
+  synced: boolean;
+  cached: boolean;
+  unsynchronizedStores: string[];
+  failedStores: string[];
+};
+
+type PendingCanonicalWrites = Partial<Record<string, unknown>>;
 
 // ---- Server availability state ----
 let serverAvailable: boolean | null = null; // null = not checked yet
 let lastServerCheck = 0;
 const SERVER_CHECK_INTERVAL = 30000; // Re-check every 30s if server was down
 
-async function checkServerAvailability(): Promise<boolean> {
+async function checkServerAvailability(force = false): Promise<boolean> {
   const now = Date.now();
-  if (serverAvailable !== null && (now - lastServerCheck) < SERVER_CHECK_INTERVAL) {
+  if (!force && serverAvailable !== null && (now - lastServerCheck) < SERVER_CHECK_INTERVAL) {
     return serverAvailable;
   }
 
@@ -60,17 +77,38 @@ async function serverGet<T>(username: string, store: string): Promise<T | null> 
 }
 
 async function serverSet(username: string, store: string, data: any): Promise<boolean> {
-  try {
-    const res = await fetch(API_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, store, data }),
-      signal: AbortSignal.timeout(30000), // 30s for large chunked stores
-    });
-    return res.ok;
-  } catch {
+  // Canonical Suite resources are upserts only. An empty collection cannot
+  // safely imply deletion, so report it as unsynchronized instead of lying.
+  if (CANONICAL_STORES.has(store) && Array.isArray(data) && data.length === 0) {
     return false;
   }
+  const batches = CANONICAL_STORES.has(store) && Array.isArray(data)
+    ? Array.from({ length: Math.ceil(data.length / CANONICAL_SYNC_BATCH_SIZE) }, (_, index) => data.slice(index * CANONICAL_SYNC_BATCH_SIZE, (index + 1) * CANONICAL_SYNC_BATCH_SIZE))
+    : [data];
+
+  for (const batch of batches) {
+    let delivered = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, store, data: batch }),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (res.ok) {
+          delivered = true;
+          break;
+        }
+        if (res.status < 500 && res.status !== 409 && res.status !== 422) return false;
+      } catch {
+        // Retry transient network and Worker failures before using local fallback.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+    }
+    if (!delivered) return false;
+  }
+  return true;
 }
 
 async function serverGetAll(username: string): Promise<Record<string, any> | null> {
@@ -83,32 +121,6 @@ async function serverGetAll(username: string): Promise<Record<string, any> | nul
     return json.success ? json.data : null;
   } catch {
     return null;
-  }
-}
-
-async function serverDelete(username: string, store: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
-      method: 'DELETE',
-      signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function serverSetAll(username: string, stores: Record<string, any>): Promise<boolean> {
-  try {
-    const res = await fetch(API_BASE, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, stores }),
-      signal: AbortSignal.timeout(15000),
-    });
-    return res.ok;
-  } catch {
-    return false;
   }
 }
 
@@ -131,7 +143,7 @@ function getDb(): Promise<IDBDatabase> {
       };
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        STORE_NAMES.forEach(storeName => {
+        INTERNAL_STORE_NAMES.forEach(storeName => {
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName, { keyPath: 'username' });
           }
@@ -157,46 +169,55 @@ async function localGet<T>(storeName: string, username: string): Promise<T | nul
   }
 }
 
-async function localSet<T>(storeName: string, username: string, data: T): Promise<void> {
+async function localSet<T>(storeName: string, username: string, data: T): Promise<boolean> {
   try {
     const db = await getDb();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(storeName, 'readwrite');
       const store = tx.objectStore(storeName);
       const req = store.put({ username, data });
       req.onerror = () => reject(req.error);
       req.onsuccess = () => resolve();
     });
+    return true;
   } catch {
-    // Silent fail on local cache write
+    return false;
   }
+}
+
+async function pendingCanonicalWrites(username: string): Promise<PendingCanonicalWrites> {
+  const pending = await localGet<PendingCanonicalWrites>('sync_outbox', username);
+  return pending && typeof pending === 'object' && !Array.isArray(pending) ? pending : {};
+}
+
+async function rememberPendingCanonicalWrite(username: string, storeName: string, data: unknown): Promise<void> {
+  if (!CANONICAL_STORES.has(storeName) || !Array.isArray(data) || data.length === 0) return;
+  const pending = await pendingCanonicalWrites(username);
+  pending[storeName] = data;
+  await localSet('sync_outbox', username, pending);
+}
+
+async function clearPendingCanonicalWrite(username: string, storeName: string): Promise<void> {
+  const pending = await pendingCanonicalWrites(username);
+  if (!(storeName in pending)) return;
+  delete pending[storeName];
+  await localSet('sync_outbox', username, pending);
+}
+
+async function flushPendingCanonicalWrites(username: string): Promise<void> {
+  const pending = await pendingCanonicalWrites(username);
+  for (const storeName of CANONICAL_STORES) {
+    const data = pending[storeName];
+    if (!Array.isArray(data) || data.length === 0) continue;
+    if (await serverSet(username, storeName, data)) {
+      delete pending[storeName];
+    }
+  }
+  await localSet('sync_outbox', username, pending);
 }
 
 // ---- Helpers to detect default/empty values ----
 const D1_MAX_STORE_SIZE = 900_000; // ~900KB safe limit for D1 row values
-
-// Estimate JSON size WITHOUT full serialization (avoids OOM on 100MB+ stores)
-function estimateSize(data: any): number {
-  if (data === null || data === undefined) return 4;
-  if (typeof data === 'number' || typeof data === 'boolean') return 8;
-  if (typeof data === 'string') return data.length + 2;
-  if (Array.isArray(data)) {
-    if (data.length === 0) return 2;
-    // Serialize ONLY the first item and extrapolate
-    const sampleSize = JSON.stringify(data[0]).length;
-    return (sampleSize + 1) * data.length + 2;
-  }
-  if (typeof data === 'object') {
-    const keys = Object.keys(data);
-    if (keys.length === 0) return 2;
-    // Sample first 3 values and extrapolate
-    const sampleKeys = keys.slice(0, Math.min(3, keys.length));
-    let totalSample = 0;
-    for (const k of sampleKeys) totalSample += JSON.stringify(data[k]).length + k.length + 4;
-    return Math.ceil((totalSample / sampleKeys.length) * keys.length);
-  }
-  return 100;
-}
 
 function isEmptyDefault(storeName: string, data: any): boolean {
   if (data === null || data === undefined) return true;
@@ -210,6 +231,16 @@ function isEmptyDefault(storeName: string, data: any): boolean {
 // ---- Unified read/write: server-first, local-fallback ----
 async function getData<T>(storeName: string, username: string, defaultVal: T): Promise<T> {
   const isUp = await checkServerAvailability();
+  const pending = CANONICAL_STORES.has(storeName) ? await pendingCanonicalWrites(username) : null;
+  if (pending && Object.prototype.hasOwnProperty.call(pending, storeName)) {
+    const localPending = pending[storeName] as T;
+    if (isUp && Array.isArray(localPending) && localPending.length > 0) {
+      void serverSet(username, storeName, localPending).then(async (synced) => {
+        if (synced) await clearPendingCanonicalWrite(username, storeName);
+      });
+    }
+    return localPending;
+  }
 
   if (isUp) {
     const serverData = await serverGet<T>(username, storeName);
@@ -219,12 +250,12 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
         const localData = await localGet<T>(storeName, username);
         if (localData !== null && !isEmptyDefault(storeName, localData)) {
           // Local has real data that server doesn't — use local and push to server
-          serverSet(username, storeName, localData).catch(() => {});
+          void serverSet(username, storeName, localData);
           return localData;
         }
       }
       // Server has real data — cache locally
-      localSet(storeName, username, serverData).catch(() => {});
+      void localSet(storeName, username, serverData);
       return serverData;
     }
   }
@@ -234,7 +265,7 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   if (localData !== null) {
     // If server is up but returned null (error), push local data to server (migration)
     if (isUp) {
-      serverSet(username, storeName, localData).catch(() => {});
+      void serverSet(username, storeName, localData);
     }
     return localData;
   }
@@ -242,21 +273,25 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   return defaultVal;
 }
 
-async function setData<T>(storeName: string, username: string, data: T): Promise<void> {
-  const isUp = await checkServerAvailability();
+async function setData<T>(storeName: string, username: string, data: T): Promise<CloudWriteResult> {
+  const canonical = CANONICAL_STORES.has(storeName);
+  const isUp = await checkServerAvailability(canonical);
 
   if (isUp) {
     // Server handles chunking for large data — always try server first
     const ok = await serverSet(username, storeName, data);
-    if (ok) {
-      // Also cache locally
-      localSet(storeName, username, data).catch(() => {});
-      return;
+    const cached = await localSet(storeName, username, data);
+    if (canonical) {
+      if (ok) await clearPendingCanonicalWrite(username, storeName);
+      else await rememberPendingCanonicalWrite(username, storeName, data);
     }
+    return { synced: ok, cached };
   }
 
-  // Fallback: write to local IndexedDB if server is down
-  await localSet(storeName, username, data);
+  // The cache can keep the user productive, but it is not a Suite sync.
+  const cached = await localSet(storeName, username, data);
+  if (canonical) await rememberPendingCanonicalWrite(username, storeName, data);
+  return { synced: false, cached };
 }
 
 // ---- Migration: push local IndexedDB data to server on first connect ----
@@ -282,15 +317,13 @@ async function migrateLocalToServer(username: string): Promise<void> {
       const localData = await localGet(store, username);
       if (localData === null || isEmptyDefault(store, localData)) continue;
 
-      // Local has data that server doesn't — push it up
-      const estSize = estimateSize(localData);
-      console.log(`[dbService] Migrating '${store}' (~${(estSize / 1024).toFixed(0)}KB) from local to cloud`);
+      // Local has data that server doesn't — push it up.
       await serverSet(username, store, localData);
     }
 
     migrationDone.add(username);
-  } catch (err) {
-    console.warn('[dbService] Migration failed:', err);
+  } catch {
+    // A later initialize call retries migration after a transient failure.
   }
 }
 
@@ -304,9 +337,19 @@ export const dbService = {
   async initialize(username: string): Promise<{ serverConnected: boolean }> {
     const isUp = await checkServerAvailability();
     if (isUp) {
+      void flushPendingCanonicalWrites(username);
       // Kick off migration in background
-      migrateLocalToServer(username).catch(() => {});
+      void migrateLocalToServer(username);
     }
+    return { serverConnected: isUp };
+  },
+
+  // Re-check before an event-driven or scheduled reconciliation. The normal
+  // availability cache avoids excess network traffic during routine reads;
+  // this explicit path lets a recovered Worker be used immediately.
+  async refreshConnection(username: string): Promise<{ serverConnected: boolean }> {
+    const isUp = await checkServerAvailability(true);
+    if (isUp) await flushPendingCanonicalWrites(username);
     return { serverConnected: isUp };
   },
 
@@ -315,8 +358,8 @@ export const dbService = {
     return getData<CustomerAccount[]>('accounts', username, []);
   },
 
-  async saveCustomerAccounts(username: string, accounts: CustomerAccount[]): Promise<void> {
-    await setData('accounts', username, accounts);
+  async saveCustomerAccounts(username: string, accounts: CustomerAccount[]): Promise<CloudWriteResult> {
+    return setData('accounts', username, accounts);
   },
 
   // --- Quote Archive Operations ---
@@ -324,7 +367,7 @@ export const dbService = {
     return getData<SavedQuote[]>('quotes', username, []);
   },
 
-  async saveQuote(username: string, quote: Omit<SavedQuote, 'id' | 'timestamp' | 'author'>): Promise<SavedQuote> {
+  async saveQuote(username: string, quote: Omit<SavedQuote, 'id' | 'timestamp' | 'author'>): Promise<{ quote: SavedQuote; sync: CloudWriteResult }> {
     const quotes = await this.getQuotes(username);
     const newQuote: SavedQuote = {
       ...quote,
@@ -333,18 +376,18 @@ export const dbService = {
       author: username
     };
     quotes.unshift(newQuote);
-    await setData('quotes', username, quotes.slice(0, 100));
-    return newQuote;
+    const sync = await setData('quotes', username, quotes.slice(0, 100));
+    return { quote: newQuote, sync };
   },
 
-  async saveAllQuotes(username: string, quotes: SavedQuote[]): Promise<void> {
-    await setData('quotes', username, quotes);
+  async saveAllQuotes(username: string, quotes: SavedQuote[]): Promise<CloudWriteResult> {
+    return setData('quotes', username, quotes);
   },
 
-  async deleteQuote(username: string, quoteId: string): Promise<void> {
+  async deleteQuote(username: string, quoteId: string): Promise<CloudWriteResult> {
     const quotes = await this.getQuotes(username);
     const filtered = quotes.filter(q => q.id !== quoteId);
-    await setData('quotes', username, filtered);
+    return setData('quotes', username, filtered);
   },
 
   // --- Invoice & Payment Operations ---
@@ -352,16 +395,16 @@ export const dbService = {
     return getData<InvoiceData[]>('invoices', username, []);
   },
 
-  async saveInvoices(username: string, invoices: InvoiceData[]): Promise<void> {
-    await setData('invoices', username, invoices);
+  async saveInvoices(username: string, invoices: InvoiceData[]): Promise<CloudWriteResult> {
+    return setData('invoices', username, invoices);
   },
 
   async getPayments(username: string): Promise<Payment[]> {
     return getData<Payment[]>('payments', username, []);
   },
 
-  async savePayments(username: string, payments: Payment[]): Promise<void> {
-    await setData('payments', username, payments);
+  async savePayments(username: string, payments: Payment[]): Promise<CloudWriteResult> {
+    return setData('payments', username, payments);
   },
 
   // --- Recurring Invoices ---
@@ -369,8 +412,8 @@ export const dbService = {
     return getData<RecurringInvoice[]>('recurring_invoices', username, []);
   },
 
-  async saveRecurringInvoices(username: string, recurring: RecurringInvoice[]): Promise<void> {
-    await setData('recurring_invoices', username, recurring);
+  async saveRecurringInvoices(username: string, recurring: RecurringInvoice[]): Promise<CloudWriteResult> {
+    return setData('recurring_invoices', username, recurring);
   },
 
   // --- Invoice Templates ---
@@ -378,8 +421,8 @@ export const dbService = {
     return getData<InvoiceTemplate[]>('templates', username, []);
   },
 
-  async saveTemplates(username: string, templates: InvoiceTemplate[]): Promise<void> {
-    await setData('templates', username, templates);
+  async saveTemplates(username: string, templates: InvoiceTemplate[]): Promise<CloudWriteResult> {
+    return setData('templates', username, templates);
   },
 
   // --- Draft Persistence ---
@@ -387,8 +430,8 @@ export const dbService = {
     return getData<any>('drafts', username, null);
   },
 
-  async saveDraft(username: string, data: any): Promise<void> {
-    await setData('drafts', username, data);
+  async saveDraft(username: string, data: any): Promise<CloudWriteResult> {
+    return setData('drafts', username, data);
   },
 
   // --- Billing & Resource Control ---
@@ -436,32 +479,30 @@ export const dbService = {
     return exportedData;
   },
 
-  async importAllUserData(username: string, data: Record<string, any>): Promise<void> {
-    const isUp = await checkServerAvailability();
+  async markCanonicalStoresSynchronized(username: string, stores: string[]): Promise<void> {
+    for (const storeName of stores) {
+      if (CANONICAL_STORES.has(storeName)) await clearPendingCanonicalWrite(username, storeName);
+    }
+  },
 
-    // Import store-by-store — server handles chunking for large stores
+  async importAllUserData(username: string, data: Record<string, any>): Promise<DataImportResult> {
+    const unsynchronizedStores: string[] = [];
+    const failedStores: string[] = [];
+
+    // Import store-by-store so every canonical write retains its retry outbox.
     for (const [store, storeData] of Object.entries(data)) {
       if (!STORE_NAMES.includes(store)) continue;
-
-      const estSize = estimateSize(storeData);
-
-      if (isUp) {
-        // Write to server (server auto-chunks if data is large)
-        const ok = await serverSet(username, store, storeData);
-        if (ok) {
-          console.log(`[import] ${store}: saved to cloud (~${(estSize / 1024).toFixed(0)}KB)`);
-        } else {
-          console.warn(`[import] ${store}: cloud save failed, saving locally only`);
-        }
-      }
-
-      // Always write to IndexedDB as local cache
-      try {
-        await localSet(store, username, storeData);
-      } catch (err) {
-        console.error(`[import] ${store}: local save failed`, err);
-      }
+      const result = await setData(store, username, storeData);
+      if (!result.synced) unsynchronizedStores.push(store);
+      if (!result.cached) failedStores.push(store);
     }
+
+    return {
+      synced: unsynchronizedStores.length === 0,
+      cached: failedStores.length === 0,
+      unsynchronizedStores,
+      failedStores,
+    };
   },
 
   // --- Inventory Operations ---
@@ -469,11 +510,11 @@ export const dbService = {
     return getData<InventoryPart[]>('inventory', username, []);
   },
 
-  async saveInventory(username: string, inventory: InventoryPart[]): Promise<void> {
-    await setData('inventory', username, inventory);
+  async saveInventory(username: string, inventory: InventoryPart[]): Promise<CloudWriteResult> {
+    return setData('inventory', username, inventory);
   },
 
-  async addOrUpdateInventoryParts(username: string, newParts: InventoryPart[]): Promise<void> {
+  async addOrUpdateInventoryParts(username: string, newParts: InventoryPart[]): Promise<CloudWriteResult> {
     const currentInventory = await this.getInventory(username);
     const inventoryMap = new Map(currentInventory.map(p => [p.partNo, p]));
 
@@ -493,7 +534,7 @@ export const dbService = {
       }
     }
 
-    await this.saveInventory(username, Array.from(inventoryMap.values()));
+    return this.saveInventory(username, Array.from(inventoryMap.values()));
   },
 
   // --- Parts Image Pool Operations ---
@@ -501,22 +542,22 @@ export const dbService = {
     return getData<Record<string, string>>('parts_image_pool', username, {});
   },
 
-  async savePartsImagePool(username: string, pool: Record<string, string>): Promise<void> {
-    await setData('parts_image_pool', username, pool);
+  async savePartsImagePool(username: string, pool: Record<string, string>): Promise<CloudWriteResult> {
+    return setData('parts_image_pool', username, pool);
   },
 
-  async addImageToPool(username: string, partNo: string, description: string, imageUrl: string): Promise<void> {
-    await this.addImagesToPool(username, [{ partNo, description, imageUrl }]);
+  async addImageToPool(username: string, partNo: string, description: string, imageUrl: string): Promise<CloudWriteResult> {
+    return this.addImagesToPool(username, [{ partNo, description, imageUrl }]);
   },
 
-  async addImagesToPool(username: string, images: { partNo: string, description: string, imageUrl: string }[]): Promise<void> {
-    if (images.length === 0) return;
+  async addImagesToPool(username: string, images: { partNo: string, description: string, imageUrl: string }[]): Promise<CloudWriteResult> {
+    if (images.length === 0) return { synced: true, cached: true };
     const pool = await this.getPartsImagePool(username);
     for (const img of images) {
       const key = `${img.partNo}_${img.description}`.replace(/[^a-zA-Z0-9_]/g, '_');
       pool[key] = img.imageUrl;
     }
-    await this.savePartsImagePool(username, pool);
+    return this.savePartsImagePool(username, pool);
   },
 
   async findImageInPool(username: string, partNo: string, description: string): Promise<string | null> {

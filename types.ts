@@ -178,7 +178,8 @@ export interface EmailDraft {
 export enum ParseMode {
   PASTE = 'paste',
   PDF = 'pdf',
-  EXCEL = 'excel'
+  EXCEL = 'excel',
+  VOICE = 'voice'
 }
 
 export type SyncStatus = 'stable' | 'syncing' | 'error';
@@ -190,9 +191,6 @@ declare global {
   }
   
   interface Window {
-    pdfjsLib: any;
-    pdfjsLibUrl?: string;
-    XLSX: any;
     aistudio?: AIStudio;
     AudioContext: typeof AudioContext;
     webkitAudioContext: typeof AudioContext;

@@ -4,7 +4,7 @@ import { User, CustomerAccount, SyncStatus, InvoiceData, ServiceItem, InvoiceTem
 import { Logo } from './Logo.tsx';
 import { PartImage } from './PartImage.tsx';
 import { exportInvoices } from '../services/exportService.ts';
-import { Download, FileSpreadsheet, FileText } from 'lucide-react';
+import { Copy, Download, FileSpreadsheet, FileText, Link2 } from 'lucide-react';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -71,14 +71,13 @@ const SyncIndicator: React.FC<{ status: SyncStatus }> = ({ status }) => (
 interface InvoiceSystemProps {
   currentUser: User;
   syncStatus: SyncStatus;
-  onLogout: () => void;
   customerAccounts: CustomerAccount[];
   allInvoices: InvoiceData[];
-  onSaveInvoices: (invoices: InvoiceData[]) => void;
+  onSaveInvoices: (invoices: InvoiceData[]) => Promise<boolean>;
   initialInvoice: InvoiceData | null;
   onClearInitialInvoice: () => void;
   customLogo: string | null;
-  onSendInvoice: (invoice: InvoiceData) => void;
+  onSendInvoice: (invoice: InvoiceData, paymentUrl?: string) => void;
   templates: InvoiceTemplate[];
   onSaveTemplates: (templates: InvoiceTemplate[]) => void;
   recurringInvoices: RecurringInvoice[];
@@ -122,7 +121,7 @@ const AddressBlock: React.FC<{ title: string; client?: CustomerAccount }> = ({ t
   </div>
 );
 
-export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, customerAccounts, allInvoices, onSaveInvoices, initialInvoice, onClearInitialInvoice, customLogo, onSendInvoice, templates, onSaveTemplates, recurringInvoices, onSaveRecurring, onLogout, syncStatus }) => {
+export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, customerAccounts, allInvoices, onSaveInvoices, initialInvoice, onClearInitialInvoice, customLogo, onSendInvoice, templates, onSaveTemplates, recurringInvoices, onSaveRecurring, syncStatus }) => {
   
   const [activeTab, setActiveTab] = React.useState<'editor' | 'recurring'>('editor');
   const createNewInvoice = (clientId: string = ''): InvoiceData => ({
@@ -142,6 +141,13 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
   const [localValues, setLocalValues] = React.useState<Record<string, string>>({});
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<string>('classic');
   const [showExportMenu, setShowExportMenu] = React.useState(false);
+  const [isSavingInvoice, setIsSavingInvoice] = React.useState(false);
+  const [paymentLink, setPaymentLink] = React.useState<string | null>(null);
+  const [paymentLinkInvoiceId, setPaymentLinkInvoiceId] = React.useState<string | null>(null);
+  const [paymentLinkError, setPaymentLinkError] = React.useState<string | null>(null);
+  const [isPreparingPaymentLink, setIsPreparingPaymentLink] = React.useState(false);
+
+  const currentPaymentLink = paymentLinkInvoiceId === currentInvoice.id ? paymentLink : null;
 
   const activeTemplate = templates.find(t => t.id === selectedTemplateId) || DEFAULT_TEMPLATES[0];
 
@@ -157,6 +163,9 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
   React.useEffect(() => {
     if (initialInvoice) {
       setCurrentInvoice(initialInvoice);
+      setPaymentLink(null);
+      setPaymentLinkInvoiceId(null);
+      setPaymentLinkError(null);
       onClearInitialInvoice();
     }
   }, [initialInvoice, onClearInitialInvoice]);
@@ -178,7 +187,8 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
     });
   };
   
-  const handleSaveInvoice = () => {
+  const handleSaveInvoice = async () => {
+    if (isSavingInvoice) return;
     if (!currentInvoice.clientId) {
       alert("Please select a client before saving.");
       return;
@@ -191,9 +201,86 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
     } else {
         updatedInvoices = [...allInvoices, updatedInvoice];
     }
-    onSaveInvoices(updatedInvoices);
-    alert(`Invoice ${updatedInvoice.id} synchronized successfully.`);
-    setCurrentInvoice(createNewInvoice(currentInvoice.clientId));
+    setIsSavingInvoice(true);
+    try {
+      const synchronized = await onSaveInvoices(updatedInvoices);
+      if (!synchronized) return;
+      alert(`Invoice ${updatedInvoice.id} synchronized successfully.`);
+      setCurrentInvoice(updatedInvoice);
+    } finally {
+      setIsSavingInvoice(false);
+    }
+  };
+
+  const preparePaymentLink = async (): Promise<string | null> => {
+    if (currentPaymentLink) return currentPaymentLink;
+    if (!currentInvoice.clientId) {
+      setPaymentLinkError('Select a customer and synchronize the invoice before preparing payment.');
+      return null;
+    }
+    setIsPreparingPaymentLink(true);
+    setPaymentLinkError(null);
+    try {
+      const response = await fetch('/api/invoice-payment-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceId: currentInvoice.id }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const result = await response.json().catch(() => ({})) as { url?: unknown; error?: unknown; message?: unknown };
+      const url = typeof result.url === 'string' ? result.url : '';
+      if (!response.ok || !url.startsWith('https://suite.fixmyiron.com/pay/')) {
+        throw new Error(String(result.error || result.message || 'Secure payment link could not be prepared.'));
+      }
+      setPaymentLink(url);
+      setPaymentLinkInvoiceId(currentInvoice.id);
+      return url;
+    } catch (error) {
+      setPaymentLinkError(error instanceof Error ? error.message : 'Secure payment link could not be prepared.');
+      return null;
+    } finally {
+      setIsPreparingPaymentLink(false);
+    }
+  };
+
+  const handleSendInvoiceEmail = async () => {
+    if (!allInvoices.some((invoice) => invoice.id === currentInvoice.id)) {
+      setPaymentLinkError('Synchronize this invoice with IronSuite before sending it to a customer.');
+      return;
+    }
+    const url = await preparePaymentLink();
+    if (!url) return;
+    onSendInvoice(currentInvoice, url);
+  };
+
+  const handlePreparePaymentLink = () => {
+    void preparePaymentLink();
+  };
+
+  const handleCopyPaymentLink = () => {
+    void copyPaymentLink();
+  };
+
+  const handleOpenInvoiceEmail = () => {
+    void handleSendInvoiceEmail();
+  };
+
+  const copyPaymentLink = async () => {
+    const url = await preparePaymentLink();
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setPaymentLinkError(null);
+    } catch {
+      setPaymentLinkError('The secure link is ready below. Copy it from the invoice before sharing.');
+    }
+  };
+
+  const startNewInvoice = () => {
+    setCurrentInvoice(createNewInvoice());
+    setPaymentLink(null);
+    setPaymentLinkInvoiceId(null);
+    setPaymentLinkError(null);
   };
 
   const updateItem = (id: string, field: keyof ServiceItem, value: any) => {
@@ -234,14 +321,15 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
   };
 
   const handleSendReminder = (invoice: InvoiceData) => {
-    const client = customerAccounts.find(c => c.id === invoice.clientId);
-    if (!client) return;
-    
-    const reminderInvoice: InvoiceData = {
-      ...invoice,
-      notes: `PAYMENT REMINDER: This is a friendly reminder that invoice ${invoice.id} is currently ${invoice.status}. Please settle the balance of $${formatCurrency(invoice.total)} at your earliest convenience.`
-    };
-    onSendInvoice(reminderInvoice);
+    void (async () => {
+      const url = await preparePaymentLink();
+      if (!url) return;
+      const reminderInvoice: InvoiceData = {
+        ...invoice,
+        notes: `PAYMENT REMINDER: This is a friendly reminder that invoice ${invoice.id} is currently ${invoice.status}. Please settle the balance of $${formatCurrency(invoice.total)} at your earliest convenience.`
+      };
+      onSendInvoice(reminderInvoice, url);
+    })();
   };
 
   const handleToggleRecurring = (invoice: InvoiceData) => {
@@ -318,9 +406,6 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
         </div>
         <div className="flex items-center gap-4">
             <SyncIndicator status={syncStatus} />
-            <button onClick={onLogout} className="p-2.5 bg-slate-100 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all btn-app">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-            </button>
         </div>
       </div>
 
@@ -379,19 +464,85 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
             .print-footer { display: none; }
             .num-col { text-align: right !important; }
 
+            /* html2pdf renders screen media rather than @media print. Keep its
+               document clone compact and deterministic without changing the editor. */
+            .printable-area.pdf-generation-mode {
+                width: 100% !important;
+                max-width: 100% !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                background: #fff !important;
+            }
+            .pdf-generation-mode .invoice-document {
+                width: 100% !important;
+                max-width: 100% !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+            }
+            .pdf-generation-mode .print-root {
+                padding: 30px 34px 24px !important;
+            }
+            .pdf-generation-mode .no-print {
+                display: none !important;
+            }
+            .pdf-generation-mode .invoice-notes-print {
+                display: block !important;
+                font-size: 8px !important;
+                line-height: 1.28 !important;
+                padding: 10px !important;
+                margin-top: 6px !important;
+            }
+            .pdf-generation-mode .invoice-print-footer {
+                display: block !important;
+                margin-top: 12px !important;
+                padding-top: 8px !important;
+                border-top: 1px solid #e5e7eb !important;
+                font-size: 6px !important;
+                line-height: 1.22 !important;
+                color: #374151 !important;
+                text-align: justify !important;
+            }
+            .pdf-generation-mode .invoice-payment-print {
+                display: block !important;
+                margin-top: 10px !important;
+                padding: 9px 10px !important;
+                border: 1px solid #86efac !important;
+                background: #ecfdf5 !important;
+                color: #14532d !important;
+                font-size: 7px !important;
+                line-height: 1.25 !important;
+                overflow-wrap: anywhere !important;
+            }
+            .pdf-generation-mode .invoice-payment-print a {
+                color: inherit !important;
+                text-decoration: underline !important;
+                overflow-wrap: anywhere !important;
+            }
+            .pdf-generation-mode .totals-container-print,
+            .pdf-generation-mode .terms-box,
+            .pdf-generation-mode .invoice-print-footer {
+                break-inside: auto !important;
+                page-break-inside: auto !important;
+            }
+            .pdf-generation-mode .summary-table,
+            .pdf-generation-mode .address-block,
+            .pdf-generation-mode tr {
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+            }
+
             @media print {
                 /* == INSTITUTIONAL GRADE PRODUCTION PRINT STYLESHEET V6 == */
-                @page { size: LETTER; margin: 0.5in 0.5in 0.85in 0.5in !important; }
+                @page { size: LETTER; margin: 0.45in 0.5in 0.55in 0.5in !important; }
                 *, *::before, *::after { box-sizing: border-box !important; }
                 html, body {
                     width: 100% !important; height: auto !important; margin: 0 !important; padding: 0 !important;
                     background: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;
                     color: #000 !important; font-family: 'Plus Jakarta Sans', sans-serif !important;
-                    font-size: 10pt !important; line-height: 1.5 !important;
+                    font-size: 8.5pt !important; line-height: 1.32 !important;
                 }
                 .no-print { display: none !important; }
-                /* Reserve enough room at the bottom of every page for the fixed footer + warranty block */
-                .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; padding-bottom: 0.85in !important; }
+                .print-root { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; }
 
                 .invoice-document {
                     box-shadow: none !important; border: none !important; width: 100% !important;
@@ -403,18 +554,18 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                 table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
                 thead { display: table-header-group !important; }
                 tfoot { display: table-footer-group !important; }
-                tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
+                tr { break-inside: avoid !important; page-break-inside: avoid !important; }
                 /* Keep section headers attached to following content */
                 h1, h2, h3, .section-header { break-after: avoid !important; page-break-after: avoid !important; }
 
                 .print-footer {
                     display: block !important;
                     position: fixed;
-                    bottom: 0.25in;
+                    bottom: 0.15in;
                     left: 0.5in;
                     right: 0.5in;
                     text-align: center;
-                    font-size: 8pt !important;
+                    font-size: 6.5pt !important;
                     color: #6c757d !important;
                     page-break-inside: avoid !important;
                     break-inside: avoid !important;
@@ -428,12 +579,12 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                     flex-direction: row !important;
                     justify-content: space-between !important;
                     align-items: flex-start !important;
-                    break-inside: avoid !important;
-                    page-break-inside: avoid !important;
+                    break-inside: auto !important;
+                    page-break-inside: auto !important;
                     break-before: avoid !important;
                 }
                 .summary-table { width: 100% !important; break-inside: avoid !important; page-break-inside: avoid !important; }
-                .terms-box { margin-top: 0 !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+                .terms-box { margin-top: 0 !important; break-inside: auto !important; page-break-inside: auto !important; }
                 .line-item-desc { font-size: 8pt !important; }
                 .address-block {
                     background: transparent !important;
@@ -446,15 +597,15 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                 .grid.grid-cols-2 > * { flex: 1 !important; }
                 .invoice-print-footer {
                   display: block !important;
-                  margin-top: 0.4in;
-                  font-size: 6.5pt !important;
-                  line-height: 1.2;
+                  margin-top: 0.18in;
+                  font-size: 6pt !important;
+                  line-height: 1.22;
                   color: #444;
                   text-align: justify;
                   border-top: 1px solid #eee;
-                  padding-top: 0.1in;
-                  break-inside: avoid !important;
-                  page-break-inside: avoid !important;
+                  padding-top: 0.08in;
+                  break-inside: auto !important;
+                  page-break-inside: auto !important;
                 }
                 /* Crisp print rendering */
                 body, body * { -webkit-font-smoothing: antialiased !important; text-rendering: geometricPrecision !important; }
@@ -467,21 +618,30 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
               <h2 className="text-3xl font-black uppercase text-cat-black tracking-tighter">Service Invoicing</h2>
               <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest mt-1">Enterprise Engineering Dispatch</p>
             </div>
-            <div className="flex gap-3">
-               <button type="button" onClick={handleSaveInvoice} className="px-6 py-4 bg-cat-black text-white rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-cat-black/10 btn-app hover:bg-cat-dark">
-                Sync To Cloud
+            <div className="flex flex-wrap justify-end gap-3">
+               <button type="button" onClick={startNewInvoice} className="px-5 py-4 bg-white border border-slate-200 text-slate-700 rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-sm btn-app hover:border-slate-300">
+                New Invoice
               </button>
-              <button type="button" onClick={() => onSendInvoice(currentInvoice)} className="px-6 py-4 bg-emerald-600 text-white rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-emerald-600/10 btn-app hover:bg-emerald-700">
+               <button type="button" onClick={handleSaveInvoice} disabled={isSavingInvoice} className="px-6 py-4 bg-cat-black text-white rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-cat-black/10 btn-app hover:bg-cat-dark disabled:cursor-not-allowed disabled:opacity-60">
+                {isSavingInvoice ? 'Synchronizing...' : 'Sync To Cloud'}
+              </button>
+              <button type="button" onClick={handlePreparePaymentLink} disabled={isPreparingPaymentLink || !currentInvoice.clientId} className="px-5 py-4 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl font-black uppercase text-[8px] tracking-[0.16em] shadow-sm btn-app hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-2">
+                <Link2 className="w-3.5 h-3.5" />
+                {isPreparingPaymentLink ? 'Preparing...' : currentPaymentLink ? 'Payment Link Ready' : 'Prepare Payment Link'}
+              </button>
+              {currentPaymentLink && (
+                <button type="button" onClick={handleCopyPaymentLink} disabled={isPreparingPaymentLink} className="px-5 py-4 bg-white border border-emerald-200 text-emerald-800 rounded-xl font-black uppercase text-[8px] tracking-[0.16em] shadow-sm btn-app hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-2">
+                  <Copy className="w-3.5 h-3.5" /> Copy Link
+                </button>
+              )}
+              <button type="button" onClick={handleOpenInvoiceEmail} disabled={isPreparingPaymentLink} className="px-6 py-4 bg-emerald-600 text-white rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-emerald-600/10 btn-app hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
                 Send Invoice
               </button>
               <button type="button" onClick={() => {
                 try {
                   window.focus();
                   window.print();
-                  if (window.self !== window.top) {
-                    console.warn("Print triggered in iframe context.");
-                  }
-                } catch (e) {
+                } catch {
                   alert("Printing is restricted in this preview. Please press Ctrl+P or open in a new tab.");
                 }
               }} className="px-6 py-4 bg-cat-yellow text-cat-black rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-cat-yellow/10 btn-app">
@@ -555,6 +715,25 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${recurringInvoices.some(r => r.clientId === currentInvoice.clientId && r.isActive) ? 'left-7' : 'left-1'}`} />
                     </button>
                   </div>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                    <div className="flex items-start gap-3">
+                      <Link2 className="mt-0.5 h-4 w-4 flex-none text-emerald-700" aria-hidden="true" />
+                      <div className="min-w-0">
+                        <p className="text-[8px] font-black uppercase text-emerald-900">Customer Payment Link</p>
+                        <p className="mt-1 text-[7px] font-bold leading-relaxed text-emerald-800">Stripe Checkout offers the payment methods configured for this invoice. This is separate from subscription billing.</p>
+                        {currentPaymentLink ? (
+                          <button type="button" onClick={handleCopyPaymentLink} className="mt-3 text-left text-[7px] font-black uppercase tracking-wider text-emerald-800 underline decoration-emerald-400 underline-offset-2">
+                            Copy secure payment link
+                          </button>
+                        ) : (
+                          <button type="button" onClick={handlePreparePaymentLink} disabled={isPreparingPaymentLink || !currentInvoice.clientId} className="mt-3 text-left text-[7px] font-black uppercase tracking-wider text-emerald-800 underline decoration-emerald-400 underline-offset-2 disabled:opacity-50">
+                            {isPreparingPaymentLink ? 'Preparing secure link...' : 'Prepare secure payment link'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  {paymentLinkError && <p role="alert" className="text-[7px] font-bold leading-relaxed text-red-600">{paymentLinkError}</p>}
                   {currentInvoice.status === 'unpaid' && (
                     <button 
                       onClick={() => handleSendReminder(currentInvoice)}
@@ -679,7 +858,7 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                         <div className="col-span-7 print:w-[58%]">
                           <div className="space-y-4 terms-box">
                              <div className="text-[8px] text-slate-400 uppercase font-black tracking-widest print:text-black">Notes & Terms</div>
-                             <div className="hidden print:block text-[8pt] text-slate-600 leading-relaxed italic p-4 border border-slate-200 rounded-lg">
+                             <div className="invoice-notes-print hidden print:block text-[8pt] text-slate-600 leading-relaxed italic p-4 border border-slate-200 rounded-lg">
                                 {currentInvoice.notes || "All services are billed at standard shop rates. Parts are subject to standard warranty. American Iron LLC is not liable for incidental or consequential damages."}
                              </div>
                              <textarea className="w-full bg-slate-50 rounded-3xl p-8 text-[8px] font-bold uppercase leading-relaxed text-slate-600 h-40 resize-none no-print border-none focus:bg-white transition-all shadow-inner focus:ring-4 focus:ring-cat-yellow/5" placeholder="Enter special instructions..." value={currentInvoice.notes} onChange={(e) => setCurrentInvoice({...currentInvoice, notes: e.target.value})} />
@@ -699,6 +878,13 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                               <p className="text-[7px] font-black uppercase tracking-[0.3em] opacity-60 mb-1.5 print:opacity-100" style={{ color: activeTemplate.accentColor }}>Commercial Terms</p>
                               <p className="text-[9px] font-black uppercase tracking-widest" style={{ color: activeTemplate.accentColor }}>NET 30 DAYS</p>
                            </div>
+                           {currentPaymentLink && (
+                             <div className="invoice-payment-print hidden print:block">
+                               <p className="font-black uppercase tracking-wider">Secure online payment</p>
+                               <p className="mt-1">Choose a payment method through Stripe:</p>
+                               <a href={currentPaymentLink}>{currentPaymentLink}</a>
+                             </div>
+                           )}
                         </div>
                       </div>
                       

@@ -1,17 +1,24 @@
 
-import * as XLSX from 'xlsx';
 import { InventoryPart, InvoiceData, SavedQuote, CustomerAccount, Payment } from '../types';
+import { loadSpreadsheetLibrary, spreadsheetSafeRows } from './spreadsheetService.ts';
 
-export const exportToExcel = (data: any[], fileName: string, sheetName: string = 'Data') => {
-  const worksheet = XLSX.utils.json_to_sheet(data);
+export const exportToExcel = async (data: Record<string, unknown>[], fileName: string, sheetName: string = 'Data') => {
+  const XLSX = await loadSpreadsheetLibrary();
+  const safeData = spreadsheetSafeRows(data);
+  const worksheet = XLSX.utils.json_to_sheet(safeData);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
   XLSX.writeFile(workbook, `${fileName}.xlsx`);
 };
 
-export const exportToCSV = (data: any[], fileName: string) => {
-  const worksheet = XLSX.utils.json_to_sheet(data);
-  const csv = XLSX.utils.sheet_to_csv(worksheet);
+export const exportToCSV = (data: Record<string, unknown>[], fileName: string) => {
+  const safeData = spreadsheetSafeRows(data);
+  const headers = Array.from(new Set(safeData.flatMap(row => Object.keys(row))));
+  const encode = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+  const csv = [
+    headers.map(encode).join(','),
+    ...safeData.map(row => headers.map(header => encode(row[header])).join(',')),
+  ].join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   if (link.download !== undefined) {
@@ -22,10 +29,11 @@ export const exportToCSV = (data: any[], fileName: string) => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 };
 
-export const exportInventory = (inventory: InventoryPart[], format: 'excel' | 'csv') => {
+export const exportInventory = async (inventory: InventoryPart[], format: 'excel' | 'csv') => {
   const data = inventory.map(item => ({
     'ID': item.id,
     'Part Number': item.partNo,
@@ -34,13 +42,13 @@ export const exportInventory = (inventory: InventoryPart[], format: 'excel' | 'c
   }));
   
   if (format === 'excel') {
-    exportToExcel(data, 'Inventory_Export', 'Inventory');
+    await exportToExcel(data, 'Inventory_Export', 'Inventory');
   } else {
     exportToCSV(data, 'Inventory_Export');
   }
 };
 
-export const exportInvoices = (invoices: InvoiceData[], format: 'excel' | 'csv') => {
+export const exportInvoices = async (invoices: InvoiceData[], format: 'excel' | 'csv') => {
   const data = invoices.map(invoice => ({
     'Invoice ID': invoice.id,
     'Date': invoice.date,
@@ -54,13 +62,13 @@ export const exportInvoices = (invoices: InvoiceData[], format: 'excel' | 'csv')
   }));
 
   if (format === 'excel') {
-    exportToExcel(data, 'Invoices_Export', 'Invoices');
+    await exportToExcel(data, 'Invoices_Export', 'Invoices');
   } else {
     exportToCSV(data, 'Invoices_Export');
   }
 };
 
-export const exportQuotes = (quotes: SavedQuote[], format: 'excel' | 'csv') => {
+export const exportQuotes = async (quotes: SavedQuote[], format: 'excel' | 'csv') => {
   const data = quotes.map(quote => ({
     'Quote ID': quote.id,
     'Timestamp': quote.timestamp,
@@ -72,13 +80,13 @@ export const exportQuotes = (quotes: SavedQuote[], format: 'excel' | 'csv') => {
   }));
 
   if (format === 'excel') {
-    exportToExcel(data, 'Quotes_Export', 'Quotes');
+    await exportToExcel(data, 'Quotes_Export', 'Quotes');
   } else {
     exportToCSV(data, 'Quotes_Export');
   }
 };
 
-export const exportContacts = (contacts: CustomerAccount[], format: 'excel' | 'csv', customFileName?: string) => {
+export const exportContacts = async (contacts: CustomerAccount[], format: 'excel' | 'csv', customFileName?: string) => {
   const data = contacts.map(contact => ({
     'Account Number': contact.accountNumber,
     'Company': contact.company,
@@ -93,7 +101,7 @@ export const exportContacts = (contacts: CustomerAccount[], format: 'excel' | 'c
   const fileName = customFileName || 'Contacts_Export';
 
   if (format === 'excel') {
-    exportToExcel(data, fileName, 'Contacts');
+    await exportToExcel(data, fileName, 'Contacts');
   } else {
     exportToCSV(data, fileName);
   }

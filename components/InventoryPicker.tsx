@@ -12,6 +12,7 @@ interface InventoryPickerProps {
 export const InventoryPicker: React.FC<InventoryPickerProps> = ({ isOpen, onClose, onSelect, currentUser }) => {
   const [inventory, setInventory] = useState<InventoryPart[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
@@ -22,11 +23,12 @@ export const InventoryPicker: React.FC<InventoryPickerProps> = ({ isOpen, onClos
 
   const loadInventory = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await dbService.getInventory(currentUser.username);
       setInventory(data);
-    } catch (error) {
-      console.error("Failed to load inventory:", error);
+    } catch {
+      setLoadError('Inventory could not be synchronized. Retry after Live Sync reconnects.');
     } finally {
       setIsLoading(false);
     }
@@ -76,6 +78,11 @@ export const InventoryPicker: React.FC<InventoryPickerProps> = ({ isOpen, onClos
             <div className="flex flex-col items-center justify-center py-20">
               <div className="w-12 h-12 border-4 border-slate-100 border-t-cat-black rounded-full animate-spin mb-4"></div>
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Syncing Global Inventory...</p>
+            </div>
+          ) : loadError ? (
+            <div className="text-center py-20" role="alert">
+              <p className="text-red-600 font-bold text-sm">{loadError}</p>
+              <button type="button" onClick={() => { void loadInventory(); }} className="mt-4 px-4 py-2 rounded-lg bg-cat-black text-white text-xs font-bold uppercase">Retry</button>
             </div>
           ) : filteredInventory.length === 0 ? (
             <div className="text-center py-20">

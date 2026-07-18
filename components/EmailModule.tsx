@@ -1,6 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ClientInfo, AppConfig, QuoteItem, EmailDraft, InvoiceData } from '../types.ts';
 import { generateEmailDraft } from '../services/claudeService.ts';
+
+type EmailDispatchResult = {
+  success?: boolean;
+  messageId?: string | null;
+  error?: string;
+  details?: string;
+};
 
 interface EmailModuleProps {
   isOpen: boolean;
@@ -9,13 +16,14 @@ interface EmailModuleProps {
   config?: AppConfig;
   items?: QuoteItem[];
   invoice?: InvoiceData | null;
+  paymentUrl?: string | null;
   generatePdf?: () => Promise<string | null>;
   audioData?: string | null;
   getAudioAttachment?: () => Promise<string | null>;
   onEmailSent?: (to: string, subject: string) => void;
 }
 
-export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, generatePdf, audioData, getAudioAttachment, onEmailSent }) => {
+export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, client, config, items, invoice, paymentUrl, generatePdf, audioData, getAudioAttachment, onEmailSent }) => {
   const [draft, setDraft] = useState<EmailDraft>({ to: '', subject: '', body: '' });
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -24,23 +32,40 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
   const [sendStatus, setSendStatus] = useState<string[]>([]);
   const [tone, setTone] = useState('professional');
   const consoleRef = useRef<HTMLDivElement>(null);
+  const autoAttachedDocumentRef = useRef<string | null>(null);
+  const dispatchAttemptRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
+  const documentFilename = invoice?.id ? `${invoice.id}.pdf` : (config?.quoteId ? `${config.quoteId}.pdf` : 'Document.pdf');
+
+  const requestWithDeadline = async (input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> => {
+    const controller = new AbortController();
+    let timeout: number | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = window.setTimeout(() => {
+        controller.abort();
+        reject(new Error('Request timed out'));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([fetch(input, { ...init, signal: controller.signal }), deadline]);
+    } finally {
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    }
+  };
+
+  const deliveryAttemptId = (fingerprint: string) => {
+    if (dispatchAttemptRef.current?.fingerprint === fingerprint) return dispatchAttemptRef.current.idempotencyKey;
+    const randomPart = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const idempotencyKey = `hub-email-${randomPart}`;
+    dispatchAttemptRef.current = { fingerprint, idempotencyKey };
+    return idempotencyKey;
+  };
 
   useEffect(() => {
     if (isOpen && client.email) {
       handleGenerate();
     }
     }, [isOpen, client.email, invoice]);
-
-  // Auto-attach the PDF on open so the user doesn't have to remember to click "Attach PDF"
-  useEffect(() => {
-    if (isOpen && generatePdf) {
-      // Defer one tick so the modal mounts before html2canvas captures the document underneath
-      const t = setTimeout(() => { void handleAttachPdf(); }, 150);
-      return () => clearTimeout(t);
-    }
-    // We intentionally only auto-attach on open transitions
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
 
   useEffect(() => {
     if (consoleRef.current) {
@@ -53,8 +78,8 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     try {
       const result = await generateEmailDraft(client, config, items, tone, invoice, config?.documentLanguage || 'en');
       setDraft(result);
-    } catch (err) {
-      console.error("Drafting error", err);
+    } catch {
+      setSendStatus((previous) => [...previous, '[EMAIL] Draft generation failed. You can still compose and send the message manually.']);
     } finally {
       setIsGenerating(false);
     }
@@ -69,30 +94,42 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     }
   };
 
-  const handleAttachPdf = async () => {
+  const handleAttachPdf = useCallback(async () => {
     if (!generatePdf || isAttaching) return;
     setIsAttaching('pdf');
     try {
       const base64 = await generatePdf();
-      if (base64) {
-        const sizeInMB = (base64.length * 0.75) / (1024 * 1024);
-        const filename = invoice?.id ? `${invoice.id}.pdf` : (config?.quoteId ? `${config.quoteId}.pdf` : 'Document.pdf');
-        
-        // Check if already attached
-        if (!stagedAttachments.some(a => a.filename === filename)) {
-          setStagedAttachments(prev => [...prev, {
-            filename,
-            path: base64,
-            size: `${sizeInMB.toFixed(2)} MB`
-          }]);
-        }
+      if (!base64) {
+        setSendStatus((previous) => [...previous, '[PDF] Document generation failed. Try attaching the PDF again before sending.']);
+        return;
       }
-    } catch (err) {
-      console.error("PDF Attach error", err);
+      const sizeInMB = (base64.length * 0.75) / (1024 * 1024);
+
+      if (!stagedAttachments.some(a => a.filename === documentFilename)) {
+        setStagedAttachments(prev => [...prev, {
+          filename: documentFilename,
+          path: base64,
+          size: `${sizeInMB.toFixed(2)} MB`
+        }]);
+      }
+    } catch {
+      setSendStatus((previous) => [...previous, '[PDF] Document generation failed. Try attaching the PDF again before sending.']);
     } finally {
       setIsAttaching(null);
     }
-  };
+  }, [documentFilename, generatePdf, isAttaching, stagedAttachments]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      autoAttachedDocumentRef.current = null;
+      return;
+    }
+    if (!generatePdf || autoAttachedDocumentRef.current === documentFilename) return;
+
+    autoAttachedDocumentRef.current = documentFilename;
+    const timer = window.setTimeout(() => { void handleAttachPdf(); }, 150);
+    return () => window.clearTimeout(timer);
+  }, [documentFilename, generatePdf, handleAttachPdf, isOpen]);
 
   const handleAttachAudio = async () => {
     if (!audioData || !getAudioAttachment || isAttaching) return;
@@ -112,8 +149,8 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
           }]);
         }
       }
-    } catch (err) {
-      console.error("Audio Attach error", err);
+    } catch {
+      setSendStatus((previous) => [...previous, '[AUDIO] Voice analysis could not be attached. Generate the voice analysis again and retry.']);
     } finally {
       setIsAttaching(null);
     }
@@ -130,18 +167,24 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     setIsTestingConnection(true);
     setTestResult(null);
     try {
-      const response = await fetch('/api/test-email', {
+      const response = await requestWithDeadline('/api/test-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await response.json();
-      if (data.success) {
-        setTestResult({ success: true, message: data.message });
+      }, 20_000);
+      const raw = await response.text();
+      let data: { success?: boolean; message?: string; error?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: `Email service returned HTTP ${response.status}` };
+      }
+      if (response.ok && data.success) {
+        setTestResult({ success: true, message: data.message || 'Email delivery is ready.' });
       } else {
         setTestResult({ success: false, message: data.error || 'Connection failed' });
       }
     } catch (error) {
-      setTestResult({ success: false, message: 'Network error during test' });
+      setTestResult({ success: false, message: error instanceof Error && error.message === 'Request timed out' ? 'Email service did not respond within 20 seconds. Please try again.' : 'Network error during test' });
     } finally {
       setIsTestingConnection(false);
       setTimeout(() => setTestResult(null), 5000);
@@ -166,40 +209,50 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
       return;
     }
 
-    addLog("Initializing Caterpillar Secure SMTP...");
-    await new Promise(r => setTimeout(r, 600));
+    addLog("Initializing IronSuite secure email delivery...");
     addLog("Target: " + draft.to);
     
     addLog(`Payload: ${stagedAttachments.length} Staged Attachments`);
     stagedAttachments.forEach(a => addLog(`- ${a.filename} (${a.size})`));
     
     try {
-      addLog("Connecting to Mail Server...");
+      addLog("Connecting to delivery service...");
+      const invoicePaymentMessage = invoice && paymentUrl && !draft.body.includes(paymentUrl)
+        ? `${draft.body}\n\nSecure payment: ${paymentUrl}`
+        : draft.body;
       const payload = {
         ...draft,
-        attachments: stagedAttachments.map(a => ({ filename: a.filename, path: a.path }))
+        body: invoicePaymentMessage,
+        attachments: stagedAttachments.map(a => ({ filename: a.filename, path: a.path })),
+        idempotencyKey: deliveryAttemptId(JSON.stringify([
+          draft.to,
+          draft.subject,
+          invoicePaymentMessage,
+          stagedAttachments.map(({ filename, path }) => [filename, path.length, path.slice(0, 32)])
+        ]))
       };
       
-      const response = await fetch('/api/send-email', {
+      const response = await requestWithDeadline('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+        body: JSON.stringify(payload)
+      }, 45_000);
 
-      const result = await response.json();
+      const rawResult = await response.text();
+      let result: EmailDispatchResult = {};
+      try {
+        result = rawResult ? JSON.parse(rawResult) : {};
+      } catch {
+        const plainText = rawResult.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        result = {
+          error: response.status === 503 ? 'Email worker exceeded Cloudflare resource limits' : `HTTP ${response.status}`,
+          details: plainText.slice(0, 300) || 'The email service returned a non-JSON response.',
+        };
+      }
 
-      if (response.ok) {
+      if (response.ok && result.success === true) {
         addLog("Dispatch sequence confirmed...");
-        addLog(`Message ID: ${result.messageId}`);
-        if (result.simulated) {
-          addLog("WARNING: " + result.note);
-          addLog("Emails are currently simulated. Configure SMTP in the AI Studio environment variables to send real emails.");
-        }
-        if (result.previewUrl) {
-          addLog("PREVIEW AVAILABLE: " + result.previewUrl);
-          // Do not use window.open in iframe
-        }
-        await new Promise(r => setTimeout(r, 2500));
+        addLog(`Message ID: ${result.messageId || 'confirmed'}`);
         setIsSending(false);
         onEmailSent?.(draft.to, draft.subject);
         onClose();
@@ -311,6 +364,12 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
                 <svg className="w-6 h-6 group-hover:rotate-180 transition-transform duration-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
             </button>
           </div>
+
+          {invoice && paymentUrl && (
+            <div className="border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-950" role="status">
+              A secure Stripe payment link will be included with this invoice email.
+            </div>
+          )}
 
           {/* Attachments Selection */}
           <div className="space-y-6">
@@ -440,8 +499,8 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
 
                 <button 
                     onClick={handleSend}
-                    disabled={isSending || isGenerating || !draft.to || isTestingConnection}
-                    className={`flex-grow h-[72px] rounded-[2rem] font-black text-[16px] uppercase tracking-[0.4em] flex items-center justify-center gap-6 transition-all duration-300 shadow-[0_15px_40px_rgba(0,0,0,0.15)] group relative overflow-hidden ${!draft.to ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none' : 'bg-cat-black text-white hover:bg-cat-dark active:scale-[0.98]'} ${isRtl ? 'flex-row-reverse' : ''}`}
+                    disabled={isSending || isGenerating || !!isAttaching || !draft.to || isTestingConnection}
+                    className={`flex-grow h-[72px] rounded-[2rem] font-black text-[16px] uppercase tracking-[0.4em] flex items-center justify-center gap-6 transition-all duration-300 shadow-[0_15px_40px_rgba(0,0,0,0.15)] group relative overflow-hidden ${!draft.to || isAttaching ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none' : 'bg-cat-black text-white hover:bg-cat-dark active:scale-[0.98]'} ${isRtl ? 'flex-row-reverse' : ''}`}
                 >
                     <span className="relative z-10">{isRtl ? 'تنفيذ الإرسال' : 'Execute Dispatch'}</span>
                     <svg className={`w-6 h-6 group-hover:translate-x-2 transition-transform duration-300 relative z-10 ${isRtl ? 'rotate-180 group-hover:-translate-x-2' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 7l5 5m0 0l-5 5m5-5H6"></path></svg>
