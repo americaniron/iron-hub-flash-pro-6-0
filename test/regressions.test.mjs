@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hub = (relativePath) => readFileSync(path.join(root, relativePath), 'utf8');
 const suiteWorker = () => hub('../Iron-Hub-Suite2/workers/suite-api/src/index.js');
 
-test('the standalone Hub Pages origin exposes only an authenticated, allowlisted Suite API proxy', () => {
+test('the standalone Hub Pages origin exposes only a scoped-session, allowlisted Suite API proxy', () => {
   const middleware = hub('functions/_middleware.js');
 
   assert.equal(existsSync(path.join(root, 'functions/api/send-email.js')), false);
@@ -17,36 +17,47 @@ test('the standalone Hub Pages origin exposes only an authenticated, allowlisted
   assert.match(middleware, /SUITE_API_URL/);
   assert.match(middleware, /PAGES_HOST = "iron-hub-flash-pro-6-0\.pages\.dev"/);
   assert.match(middleware, /STANDALONE_HUB_ORIGIN = "https:\/\/sellparts\.fixmyiron\.com"/);
+  assert.match(middleware, /STANDALONE_ACCESS_COOKIE = "__Host-iron_hub_access"/);
+  assert.match(middleware, /UPSTREAM_ACCESS_COOKIE = "iron_hub_standalone"/);
   assert.match(middleware, /Response\.redirect\(target\.toString\(\), 308\)/);
-  assert.match(middleware, /authorization\?\.startsWith\("Bearer "\)/);
+  assert.match(middleware, /X-Iron-Hub-Standalone/);
+  assert.match(middleware, /standaloneAccessToken\(context\.request\)/);
   assert.match(middleware, /Iron Hub API route not found/);
   assert.match(middleware, /headers\.set\("Host", url\.hostname\)/);
+  assert.doesNotMatch(middleware, /Authorization/);
   assert.doesNotMatch(middleware, /Direct Iron Hub API access is disabled/);
   assert.doesNotMatch(hub('README.md'), /GEMINI_API_KEY|AI Studio|Google Cloud|Cloud Run/i);
   assert.doesNotMatch(hub('vite.config.js'), /target:\s*['"]http:\/\/localhost:3000/);
 });
 
-test('the standalone Hub reuses Clerk while preserving the embedded Suite session path', () => {
+test('the standalone Hub uses a Suite handoff while preserving the embedded Suite session path', () => {
   const entry = hub('index.tsx');
   const auth = hub('components/StandaloneHubAuth.tsx');
   const api = hub('services/hubApi.ts');
   const app = hub('App.tsx');
+  const start = hub('functions/auth/start.js');
+  const complete = hub('functions/auth/complete.js');
+  const logout = hub('functions/auth/logout.js');
 
   assert.match(entry, /isStandaloneHubHost\(\)/);
   assert.match(entry, /<StandaloneHubAuth><App \/><\/StandaloneHubAuth>/);
   assert.match(auth, /candidate === 'sellparts\.fixmyiron\.com'/);
   assert.match(auth, /candidate === 'iron-hub-flash-pro-6-0\.pages\.dev'/);
   assert.doesNotMatch(auth, /endsWith\('\.iron-hub-flash-pro-6-0\.pages\.dev'\)/);
-  assert.match(auth, /ClerkProvider/);
-  assert.match(auth, /const \{ getToken, isLoaded, isSignedIn \} = useAuth\(\)/);
-  assert.match(auth, /tokenBridgeState !== \(isSignedIn \? 'signed-in' : 'signed-out'\)/);
-  assert.match(auth, /window\.setTimeout\(\(\) => setLoadTimedOut\(true\), 12_000\)/);
-  assert.match(auth, /<UserButton afterSignOutUrl="\/" \/>/);
-  assert.match(auth, /<SignIn/);
-  assert.match(api, /requestUrl\.origin === window\.location\.origin/);
-  assert.match(api, /requestUrl\.pathname\.startsWith\('\/api\/'\)/);
+  assert.match(auth, /HANDOFF_START_PATH = '\/auth\/start'/);
+  assert.match(auth, /hubApiFetch\('\/api\/hub-session'/);
+  assert.match(auth, /window\.location\.replace/);
+  assert.match(auth, /<LogOut/);
+  assert.doesNotMatch(auth, /ClerkProvider|useAuth|SignIn|UserButton/);
   assert.match(api, /credentials: init\.credentials \?\? 'same-origin'/);
-  assert.match(api, /headers\.set\('Authorization', `Bearer \$\{token\}`\)/);
+  assert.doesNotMatch(api, /Authorization|tokenGetter/);
+  assert.match(start, /__Host-iron_hub_handoff/);
+  assert.match(start, /state_hash/);
+  assert.match(start, /crypto\.subtle\.digest/);
+  assert.match(complete, /__Host-iron_hub_access/);
+  assert.match(complete, /X-Iron-Hub-Standalone-Exchange/);
+  assert.match(complete, /SameSite=Strict/);
+  assert.match(logout, /ACCESS_COOKIE\}=; Max-Age=0/);
   assert.match(app, /hubApiFetch\('\/api\/hub-session'/);
   assert.match(app, /No separate Hub password is accepted/);
 });

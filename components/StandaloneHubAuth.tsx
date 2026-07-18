@@ -1,31 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import {
-  ClerkProvider,
-  SignIn,
-  SignedIn,
-  SignedOut,
-  UserButton,
-  useAuth,
-} from '@clerk/clerk-react';
-import { setHubApiTokenGetter } from '../services/hubApi.ts';
+import { LogOut } from 'lucide-react';
+import { hubApiFetch } from '../services/hubApi.ts';
 
-const CLERK_JS_URL = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js';
-
-function isValidPublishableKey(value: string | undefined): value is string {
-  if (typeof value !== 'string') return false;
-  const parts = value.split('_');
-  if (parts.length !== 3 || parts[0] !== 'pk' || !['live', 'test'].includes(parts[1]) || !/^[A-Za-z0-9_-]+={0,2}$/.test(parts[2])) {
-    return false;
-  }
-
-  try {
-    const encoded = parts[2].replace(/-/g, '+').replace(/_/g, '/');
-    const decoded = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '='));
-    return decoded.endsWith('$') && decoded.slice(0, -1).includes('.');
-  } catch {
-    return false;
-  }
-}
+const HANDOFF_START_PATH = '/auth/start';
 
 export function isStandaloneHubHost(hostname?: string): boolean {
   const candidate = hostname || (typeof window === 'undefined' ? '' : window.location.hostname);
@@ -33,103 +10,89 @@ export function isStandaloneHubHost(hostname?: string): boolean {
     || candidate === 'iron-hub-flash-pro-6-0.pages.dev';
 }
 
-function StandaloneTokenBridge({ children }: { children: React.ReactNode }) {
-  const { getToken, isLoaded, isSignedIn } = useAuth();
-  const [tokenBridgeState, setTokenBridgeState] = useState<'unknown' | 'signed-in' | 'signed-out'>('unknown');
-  const [loadTimedOut, setLoadTimedOut] = useState(false);
+type AccessState = 'checking' | 'authenticated' | 'unavailable';
+
+function returnPath(): string {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function beginSuiteHandoff(): void {
+  window.location.replace(`${HANDOFF_START_PATH}?return_to=${encodeURIComponent(returnPath())}`);
+}
+
+function StandaloneAccessGate({ children }: { children: React.ReactNode }) {
+  const [accessState, setAccessState] = useState<AccessState>('checking');
 
   useEffect(() => {
-    setHubApiTokenGetter(isSignedIn ? () => getToken() : null);
-    setTokenBridgeState(isSignedIn ? 'signed-in' : 'signed-out');
-    return () => setHubApiTokenGetter(null);
-  }, [getToken, isSignedIn]);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12_000);
 
-  useEffect(() => {
-    if (isLoaded) {
-      setLoadTimedOut(false);
-      return;
-    }
+    void hubApiFetch('/api/hub-session', {
+      cache: 'no-store',
+      signal: controller.signal,
+    }).then((response) => {
+      if (response.ok) {
+        setAccessState('authenticated');
+        return;
+      }
 
-    const timeout = window.setTimeout(() => setLoadTimedOut(true), 12_000);
-    return () => window.clearTimeout(timeout);
-  }, [isLoaded]);
+      if (response.status === 401) {
+        beginSuiteHandoff();
+        return;
+      }
 
-  if (!isLoaded) {
-    if (loadTimedOut) {
-      return (
-        <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 text-center">
-          <div className="max-w-md space-y-4">
-            <p className="text-cat-yellow text-xs font-black uppercase tracking-widest">Sign-in unavailable</p>
-            <h1 className="text-2xl font-black uppercase text-white">Iron Hub cannot reach its identity service</h1>
-            <p className="text-sm leading-relaxed text-slate-300">Please try again shortly or contact the workspace administrator.</p>
-          </div>
-        </div>
-      );
-    }
+      setAccessState('unavailable');
+    }).catch(() => setAccessState('unavailable')).finally(() => window.clearTimeout(timeout));
 
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, []);
+
+  if (accessState === 'authenticated') {
     return (
-      <div className="min-h-screen bg-cat-black flex items-center justify-center text-cat-yellow text-xs font-black uppercase tracking-widest">
-        Loading secure workspace...
-      </div>
+      <>
+        <button
+          type="button"
+          aria-label="Exit standalone Iron Hub"
+          title="Exit standalone Iron Hub"
+          onClick={() => window.location.assign('/auth/logout')}
+          className="fixed right-3 top-3 z-[500] no-print inline-flex h-9 items-center gap-2 border border-white/20 bg-cat-black px-3 text-xs font-bold uppercase tracking-wide text-white shadow-lg transition-colors hover:border-cat-yellow hover:text-cat-yellow"
+        >
+          <LogOut size={16} aria-hidden="true" />
+          <span>Exit</span>
+        </button>
+        {children}
+      </>
     );
   }
 
-  if (tokenBridgeState !== (isSignedIn ? 'signed-in' : 'signed-out')) {
+  if (accessState === 'unavailable') {
     return (
-      <div className="min-h-screen bg-cat-black flex items-center justify-center text-cat-yellow text-xs font-black uppercase tracking-widest">
-        Loading secure workspace...
+      <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 text-center">
+        <div className="max-w-md space-y-4">
+          <p className="text-cat-yellow text-xs font-black uppercase tracking-widest">Workspace unavailable</p>
+          <h1 className="text-2xl font-black uppercase text-white">Iron Hub could not verify access</h1>
+          <button
+            type="button"
+            onClick={beginSuiteHandoff}
+            className="border border-cat-yellow bg-cat-yellow px-4 py-2 text-sm font-black uppercase text-cat-black"
+          >
+            Try again
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
-    <>
-      <SignedOut>
-        <main className="min-h-screen bg-cat-black flex items-center justify-center p-6">
-          <SignIn
-            routing="hash"
-            forceRedirectUrl="/"
-            signUpForceRedirectUrl="/"
-            signUpUrl="https://suite.fixmyiron.com/sign-up"
-          />
-        </main>
-      </SignedOut>
-      <SignedIn>
-        <div className="fixed right-3 top-3 z-[500] no-print">
-          <UserButton afterSignOutUrl="/" />
-        </div>
-        {children}
-      </SignedIn>
-    </>
+    <div className="min-h-screen bg-cat-black flex items-center justify-center text-cat-yellow text-xs font-black uppercase tracking-widest">
+      Loading secure workspace...
+    </div>
   );
 }
 
 export function StandaloneHubAuth({ children }: { children: React.ReactNode }) {
-  const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
-
-  if (!isValidPublishableKey(publishableKey)) {
-    return (
-      <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 text-center">
-        <div className="max-w-md space-y-4">
-          <p className="text-cat-yellow text-xs font-black uppercase tracking-widest">Authentication configuration required</p>
-          <h1 className="text-2xl font-black uppercase text-white">Iron Hub cannot start sign-in</h1>
-          <p className="text-sm leading-relaxed text-slate-300">This deployment is missing its Clerk publishable key. Contact the workspace administrator.</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <ClerkProvider
-      publishableKey={publishableKey}
-      clerkJSUrl={CLERK_JS_URL}
-      afterSignOutUrl="/"
-      signInFallbackRedirectUrl="/"
-      signUpFallbackRedirectUrl="/"
-      signInForceRedirectUrl="/"
-      signUpForceRedirectUrl="/"
-    >
-      <StandaloneTokenBridge>{children}</StandaloneTokenBridge>
-    </ClerkProvider>
-  );
+  return <StandaloneAccessGate>{children}</StandaloneAccessGate>;
 }

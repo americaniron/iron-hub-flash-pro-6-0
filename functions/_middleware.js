@@ -13,6 +13,8 @@ const HUB_API_ENDPOINTS = new Set([
 ]);
 const PAGES_HOST = "iron-hub-flash-pro-6-0.pages.dev";
 const STANDALONE_HUB_ORIGIN = "https://sellparts.fixmyiron.com";
+const STANDALONE_ACCESS_COOKIE = "__Host-iron_hub_access";
+const UPSTREAM_ACCESS_COOKIE = "iron_hub_standalone";
 
 function json(body, status) {
   return Response.json(body, {
@@ -46,18 +48,36 @@ function standaloneCanonicalRedirect(url) {
   return Response.redirect(target.toString(), 308);
 }
 
-function buildProxyHeaders(request, url) {
+function getCookie(request, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = (request.headers.get("Cookie") || "").match(new RegExp(`(?:^|;\\s*)${escaped}=([^;]+)`));
+  if (!match) return "";
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+function standaloneAccessToken(request) {
+  const value = getCookie(request, STANDALONE_ACCESS_COOKIE);
+  return /^[a-f0-9]{64}$/i.test(value) ? value : "";
+}
+
+function buildProxyHeaders(request, url, accessToken) {
   const headers = new Headers();
-  const authorization = request.headers.get("Authorization");
-  if (authorization) headers.set("Authorization", authorization);
   const contentType = request.headers.get("Content-Type");
   if (contentType) headers.set("Content-Type", contentType);
   const accept = request.headers.get("Accept");
   if (accept) headers.set("Accept", accept);
+  const origin = request.headers.get("Origin");
+  if (origin) headers.set("Origin", origin);
   const clientIp = request.headers.get("CF-Connecting-IP");
   if (clientIp) headers.set("X-Forwarded-For", clientIp);
   headers.set("X-Forwarded-Host", url.hostname);
   headers.set("X-Forwarded-Proto", url.protocol.replace(":", ""));
+  headers.set("X-Iron-Hub-Standalone", "1");
+  headers.set("Cookie", `${UPSTREAM_ACCESS_COOKIE}=${encodeURIComponent(accessToken)}`);
   headers.set("Host", url.hostname);
   return headers;
 }
@@ -67,8 +87,8 @@ async function proxyStandaloneHubApi(context, url) {
     return json({ error: "Iron Hub API route not found." }, 404);
   }
 
-  const authorization = context.request.headers.get("Authorization");
-  if (!authorization?.startsWith("Bearer ")) {
+  const accessToken = standaloneAccessToken(context.request);
+  if (!accessToken) {
     return json({ error: "Sign in is required to use Iron Hub." }, 401);
   }
 
@@ -80,7 +100,7 @@ async function proxyStandaloneHubApi(context, url) {
   const targetUrl = new URL(`${url.pathname}${url.search}`, backend);
   const init = {
     method: context.request.method,
-    headers: buildProxyHeaders(context.request, url),
+    headers: buildProxyHeaders(context.request, url, accessToken),
     redirect: "manual",
   };
   if (context.request.method !== "GET" && context.request.method !== "HEAD") {
@@ -113,9 +133,8 @@ export async function onRequest(context) {
   const canonicalRedirect = standaloneCanonicalRedirect(url);
   if (canonicalRedirect) return canonicalRedirect;
 
-  // The standalone Hub presents the same Clerk sign-in as IronSuite and only
-  // proxies a fixed API allowlist. The Suite Worker validates each bearer
-  // token and remains authoritative for tenants, roles, and entitlements.
+  // Browser requests carry only the standalone HttpOnly session cookie. The
+  // Suite Worker remains authoritative for tenants, roles, and entitlements.
   if (url.pathname.startsWith("/api/")) {
     return proxyStandaloneHubApi(context, url);
   }
