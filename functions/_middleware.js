@@ -11,6 +11,8 @@ const HUB_API_ENDPOINTS = new Set([
   "test-email",
   "transcribe",
 ]);
+const PAGES_HOST = "iron-hub-flash-pro-6-0.pages.dev";
+const STANDALONE_HUB_ORIGIN = "https://sellparts.fixmyiron.com";
 
 function json(body, status) {
   return Response.json(body, {
@@ -36,6 +38,12 @@ function suiteApiUrl(value) {
 function isHubApiPath(pathname) {
   if (!pathname.startsWith("/api/")) return false;
   return HUB_API_ENDPOINTS.has(pathname.slice("/api/".length));
+}
+
+function standaloneCanonicalRedirect(url) {
+  if (url.hostname !== PAGES_HOST) return null;
+  const target = new URL(url.pathname + url.search, STANDALONE_HUB_ORIGIN);
+  return Response.redirect(target.toString(), 308);
 }
 
 function buildProxyHeaders(request, url) {
@@ -102,6 +110,8 @@ async function proxyStandaloneHubApi(context, url) {
 
 export async function onRequest(context) {
   const url = new URL(context.request.url);
+  const canonicalRedirect = standaloneCanonicalRedirect(url);
+  if (canonicalRedirect) return canonicalRedirect;
 
   // The standalone Hub presents the same Clerk sign-in as IronSuite and only
   // proxies a fixed API allowlist. The Suite Worker validates each bearer

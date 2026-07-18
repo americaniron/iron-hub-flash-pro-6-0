@@ -36,6 +36,7 @@ export function isStandaloneHubHost(hostname?: string): boolean {
 function StandaloneTokenBridge({ children }: { children: React.ReactNode }) {
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const [tokenBridgeState, setTokenBridgeState] = useState<'unknown' | 'signed-in' | 'signed-out'>('unknown');
+  const [loadTimedOut, setLoadTimedOut] = useState(false);
 
   useEffect(() => {
     setHubApiTokenGetter(isSignedIn ? () => getToken() : null);
@@ -43,7 +44,37 @@ function StandaloneTokenBridge({ children }: { children: React.ReactNode }) {
     return () => setHubApiTokenGetter(null);
   }, [getToken, isSignedIn]);
 
-  if (!isLoaded || tokenBridgeState !== (isSignedIn ? 'signed-in' : 'signed-out')) {
+  useEffect(() => {
+    if (isLoaded) {
+      setLoadTimedOut(false);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => setLoadTimedOut(true), 12_000);
+    return () => window.clearTimeout(timeout);
+  }, [isLoaded]);
+
+  if (!isLoaded) {
+    if (loadTimedOut) {
+      return (
+        <div className="min-h-screen bg-cat-black flex items-center justify-center p-6 text-center">
+          <div className="max-w-md space-y-4">
+            <p className="text-cat-yellow text-xs font-black uppercase tracking-widest">Sign-in unavailable</p>
+            <h1 className="text-2xl font-black uppercase text-white">Iron Hub cannot reach its identity service</h1>
+            <p className="text-sm leading-relaxed text-slate-300">Please try again shortly or contact the workspace administrator.</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-h-screen bg-cat-black flex items-center justify-center text-cat-yellow text-xs font-black uppercase tracking-widest">
+        Loading secure workspace...
+      </div>
+    );
+  }
+
+  if (tokenBridgeState !== (isSignedIn ? 'signed-in' : 'signed-out')) {
     return (
       <div className="min-h-screen bg-cat-black flex items-center justify-center text-cat-yellow text-xs font-black uppercase tracking-widest">
         Loading secure workspace...

@@ -15,6 +15,9 @@ test('the standalone Hub Pages origin exposes only an authenticated, allowlisted
   assert.equal(existsSync(path.join(root, 'functions/api/sync-debug.js')), false);
   assert.match(middleware, /HUB_API_ENDPOINTS/);
   assert.match(middleware, /SUITE_API_URL/);
+  assert.match(middleware, /PAGES_HOST = "iron-hub-flash-pro-6-0\.pages\.dev"/);
+  assert.match(middleware, /STANDALONE_HUB_ORIGIN = "https:\/\/sellparts\.fixmyiron\.com"/);
+  assert.match(middleware, /Response\.redirect\(target\.toString\(\), 308\)/);
   assert.match(middleware, /authorization\?\.startsWith\("Bearer "\)/);
   assert.match(middleware, /Iron Hub API route not found/);
   assert.match(middleware, /headers\.set\("Host", url\.hostname\)/);
@@ -37,6 +40,7 @@ test('the standalone Hub reuses Clerk while preserving the embedded Suite sessio
   assert.match(auth, /ClerkProvider/);
   assert.match(auth, /const \{ getToken, isLoaded, isSignedIn \} = useAuth\(\)/);
   assert.match(auth, /tokenBridgeState !== \(isSignedIn \? 'signed-in' : 'signed-out'\)/);
+  assert.match(auth, /window\.setTimeout\(\(\) => setLoadTimedOut\(true\), 12_000\)/);
   assert.match(auth, /<UserButton afterSignOutUrl="\/" \/>/);
   assert.match(auth, /<SignIn/);
   assert.match(api, /requestUrl\.origin === window\.location\.origin/);

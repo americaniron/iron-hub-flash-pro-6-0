@@ -9,8 +9,10 @@ application. Production runs entirely on Cloudflare:
   data persistence, audit logging, and tenant authorization.
 - The standalone hosts (`sellparts.fixmyiron.com` and
   `iron-hub-flash-pro-6-0.pages.dev`) use the same Clerk sign-in as IronSuite.
-  Their Pages Function forwards only the documented Hub API allowlist and only
-  when the browser supplies a current Clerk bearer token.
+  The Pages hostname permanently redirects to `sellparts.fixmyiron.com`, keeping
+  authentication on the configured `fixmyiron.com` domain. Its Pages Function
+  forwards only the documented Hub API allowlist and only when the browser
+  supplies a current Clerk bearer token.
 - Do not add provider keys, SMTP credentials, Gemini configuration, or a
   separate backend to this repository.
 
