@@ -4,6 +4,7 @@ import { User, CustomerAccount, SyncStatus, InvoiceData, ServiceItem, InvoiceTem
 import { Logo } from './Logo.tsx';
 import { PartImage } from './PartImage.tsx';
 import { exportInvoices } from '../services/exportService.ts';
+import { hubApiFetch } from '../services/hubApi.ts';
 import { Copy, Download, FileSpreadsheet, FileText, Link2 } from 'lucide-react';
 
 // --- High-Fidelity UI Components ---
@@ -221,7 +222,7 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
     setIsPreparingPaymentLink(true);
     setPaymentLinkError(null);
     try {
-      const response = await fetch('/api/invoice-payment-link', {
+      const response = await hubApiFetch('/api/invoice-payment-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoiceId: currentInvoice.id }),

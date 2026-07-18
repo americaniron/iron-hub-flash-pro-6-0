@@ -8,12 +8,62 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hub = (relativePath) => readFileSync(path.join(root, relativePath), 'utf8');
 const suiteWorker = () => hub('../Iron-Hub-Suite2/workers/suite-api/src/index.js');
 
-test('the standalone Hub Pages origin has no direct provider or data functions', () => {
+test('the standalone Hub Pages origin exposes only an authenticated, allowlisted Suite API proxy', () => {
+  const middleware = hub('functions/_middleware.js');
+
   assert.equal(existsSync(path.join(root, 'functions/api/send-email.js')), false);
   assert.equal(existsSync(path.join(root, 'functions/api/sync-debug.js')), false);
-  assert.match(hub('functions/_middleware.js'), /Direct Iron Hub API access is disabled/);
+  assert.match(middleware, /HUB_API_ENDPOINTS/);
+  assert.match(middleware, /SUITE_API_URL/);
+  assert.match(middleware, /authorization\?\.startsWith\("Bearer "\)/);
+  assert.match(middleware, /Iron Hub API route not found/);
+  assert.match(middleware, /headers\.set\("Host", url\.hostname\)/);
+  assert.doesNotMatch(middleware, /Direct Iron Hub API access is disabled/);
   assert.doesNotMatch(hub('README.md'), /GEMINI_API_KEY|AI Studio|Google Cloud|Cloud Run/i);
   assert.doesNotMatch(hub('vite.config.js'), /target:\s*['"]http:\/\/localhost:3000/);
+});
+
+test('the standalone Hub reuses Clerk while preserving the embedded Suite session path', () => {
+  const entry = hub('index.tsx');
+  const auth = hub('components/StandaloneHubAuth.tsx');
+  const api = hub('services/hubApi.ts');
+  const app = hub('App.tsx');
+
+  assert.match(entry, /isStandaloneHubHost\(\)/);
+  assert.match(entry, /<StandaloneHubAuth><App \/><\/StandaloneHubAuth>/);
+  assert.match(auth, /candidate === 'sellparts\.fixmyiron\.com'/);
+  assert.match(auth, /candidate === 'iron-hub-flash-pro-6-0\.pages\.dev'/);
+  assert.doesNotMatch(auth, /endsWith\('\.iron-hub-flash-pro-6-0\.pages\.dev'\)/);
+  assert.match(auth, /ClerkProvider/);
+  assert.match(auth, /const \{ getToken, isLoaded, isSignedIn \} = useAuth\(\)/);
+  assert.match(auth, /tokenBridgeState !== \(isSignedIn \? 'signed-in' : 'signed-out'\)/);
+  assert.match(auth, /<UserButton afterSignOutUrl="\/" \/>/);
+  assert.match(auth, /<SignIn/);
+  assert.match(api, /requestUrl\.origin === window\.location\.origin/);
+  assert.match(api, /requestUrl\.pathname\.startsWith\('\/api\/'\)/);
+  assert.match(api, /credentials: init\.credentials \?\? 'same-origin'/);
+  assert.match(api, /headers\.set\('Authorization', `Bearer \$\{token\}`\)/);
+  assert.match(app, /hubApiFetch\('\/api\/hub-session'/);
+  assert.match(app, /No separate Hub password is accepted/);
+});
+
+test('every browser-facing Hub API caller uses the authenticated API client', () => {
+  const clients = [
+    'App.tsx',
+    'services/claudeService.ts',
+    'services/dbService.ts',
+    'services/bridgeSync.ts',
+    'services/activityBridge.ts',
+    'components/EmailModule.tsx',
+    'components/AccountsSystem.tsx',
+    'components/InvoiceSystem.tsx',
+  ];
+
+  for (const client of clients) {
+    const source = hub(client);
+    assert.match(source, /hubApiFetch/);
+    assert.doesNotMatch(source, /(?<!hubApi)fetch\(/);
+  }
 });
 
 test('Hub workspace modules share the root React instance instead of crossing a lazy bundle boundary', () => {
@@ -32,7 +82,7 @@ test('email dispatch has an enforceable deadline, idempotent retries, and only r
   const worker = suiteWorker();
 
   assert.match(email, /const requestWithDeadline = async/);
-  assert.match(email, /return await Promise\.race\(\[fetch\(input, \{ \.\.\.init, signal: controller\.signal \}\), deadline\]\)/);
+  assert.match(email, /return await Promise\.race\(\[hubApiFetch\(input, \{ \.\.\.init, signal: controller\.signal \}\), deadline\]\)/);
   assert.match(email, /idempotencyKey: deliveryAttemptId/);
   assert.match(email, /45_000/);
   assert.match(email, /response\.ok && result\.success === true/);
@@ -49,7 +99,7 @@ test('Hub invoice delivery prepares a canonical one-time payment link before it 
   const app = hub('App.tsx');
   const email = hub('components/EmailModule.tsx');
 
-  assert.match(invoiceSystem, /fetch\('\/api\/invoice-payment-link'/);
+  assert.match(invoiceSystem, /hubApiFetch\('\/api\/invoice-payment-link'/);
   assert.match(invoiceSystem, /allInvoices\.some\(\(invoice\) => invoice\.id === currentInvoice\.id\)/);
   assert.match(invoiceSystem, /if \(!url\) return;/);
   assert.match(invoiceSystem, /paymentLinkInvoiceId === currentInvoice\.id/);
@@ -133,11 +183,11 @@ test('the embedded Hub reconciles canonical data after a missed realtime event w
   assert.match(app, /queueAllCanonicalStores\(\)/);
 });
 
-test('the embedded Hub inherits the scoped IronSuite session and has no independent credentials', () => {
+test('the Hub profile flow has no independent credentials', () => {
   const app = hub('App.tsx');
   const worker = suiteWorker();
 
-  assert.match(app, /fetch\('\/api\/hub-session'/);
+  assert.match(app, /hubApiFetch\('\/api\/hub-session'/);
   assert.match(app, /No separate Hub password is accepted/);
   assert.doesNotMatch(app, /localStorage\.getItem\('iron_hub_user'\)|localStorage\.setItem\('iron_hub_user'/);
   assert.doesNotMatch(app, /ironman1111|YaKareem1121@|batbout|batto123/);

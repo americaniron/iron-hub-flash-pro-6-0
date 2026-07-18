@@ -1,5 +1,6 @@
 
 import { CustomerAccount, SavedQuote, InvoiceData, Payment, RecurringInvoice, InvoiceTemplate, InventoryPart } from '../types.ts';
+import { hubApiFetch } from './hubApi.ts';
 
 /**
  * Enterprise Cloud Repository Service — V2 (Server-Backed)
@@ -48,7 +49,7 @@ async function checkServerAvailability(force = false): Promise<boolean> {
   }
 
   try {
-    const res = await fetch(API_STATUS, { signal: AbortSignal.timeout(5000) });
+    const res = await hubApiFetch(API_STATUS, { signal: AbortSignal.timeout(5000) });
     if (res.ok) {
       const json = await res.json();
       serverAvailable = json.serverStorage === true;
@@ -65,7 +66,7 @@ async function checkServerAvailability(force = false): Promise<boolean> {
 // ---- Server API helpers ----
 async function serverGet<T>(username: string, store: string): Promise<T | null> {
   try {
-    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
+    const res = await hubApiFetch(`${API_BASE}?username=${encodeURIComponent(username)}&store=${encodeURIComponent(store)}`, {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
@@ -90,7 +91,7 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
     let delivered = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const res = await fetch(API_BASE, {
+        const res = await hubApiFetch(API_BASE, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, store, data: batch }),
@@ -113,7 +114,7 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
 
 async function serverGetAll(username: string): Promise<Record<string, any> | null> {
   try {
-    const res = await fetch(`${API_BASE}?username=${encodeURIComponent(username)}`, {
+    const res = await hubApiFetch(`${API_BASE}?username=${encodeURIComponent(username)}`, {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return null;

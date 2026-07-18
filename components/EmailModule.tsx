@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ClientInfo, AppConfig, QuoteItem, EmailDraft, InvoiceData } from '../types.ts';
 import { generateEmailDraft } from '../services/claudeService.ts';
+import { hubApiFetch } from '../services/hubApi.ts';
 
 type EmailDispatchResult = {
   success?: boolean;
@@ -47,7 +48,7 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     });
 
     try {
-      return await Promise.race([fetch(input, { ...init, signal: controller.signal }), deadline]);
+      return await Promise.race([hubApiFetch(input, { ...init, signal: controller.signal }), deadline]);
     } finally {
       if (timeout !== undefined) window.clearTimeout(timeout);
     }

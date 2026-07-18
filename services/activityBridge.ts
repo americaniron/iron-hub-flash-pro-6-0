@@ -3,6 +3,7 @@
  * Failed writes remain in this tab's durable queue and retry with backoff;
  * they are never sent to a third-party endpoint or signed with a client key.
  */
+import { hubApiFetch } from './hubApi.ts';
 
 type ActivityPayload = {
   type: string;
@@ -60,7 +61,7 @@ async function flush(): Promise<void> {
     while (queue.length > 0) {
       const entry = queue[0];
       try {
-        const response = await fetch('/api/activity', {
+        const response = await hubApiFetch('/api/activity', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

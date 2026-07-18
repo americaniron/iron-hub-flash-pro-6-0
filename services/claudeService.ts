@@ -7,6 +7,7 @@
  */
 
 import { QuoteItem, ClientInfo, AppConfig, EmailDraft, InvoiceData } from "../types.ts";
+import { hubApiFetch } from './hubApi.ts';
 
 const STANDARD_MAX_TOKENS = 2048;
 const THINKING_MAX_TOKENS = 16000;
@@ -26,7 +27,7 @@ async function callClaude(params: {
   thinking?: { budget_tokens: number };
   prompt?: string; // for image action
 }) {
-  const response = await fetch("/api/claude", {
+  const response = await hubApiFetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -42,7 +43,7 @@ async function callClaude(params: {
 }
 
 async function callVoiceSynthesis(text: string) {
-  const response = await fetch("/api/elevenlabs-tts", {
+  const response = await hubApiFetch("/api/elevenlabs-tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
@@ -74,7 +75,7 @@ export async function transcribeAudio(audio: Blob, language: TranscriptionLangua
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
 
-  const response = await fetch('/api/transcribe', {
+  const response = await hubApiFetch('/api/transcribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

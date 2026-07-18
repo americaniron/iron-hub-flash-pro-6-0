@@ -6,6 +6,7 @@
  * request is authorized by that session and scoped by the Worker to one
  * organization and user.
  */
+import { hubApiFetch } from './hubApi.ts';
 
 const DATA_ENDPOINT = '/api/data';
 const STATUS_ENDPOINT = '/api/data-status';
@@ -84,7 +85,7 @@ async function synchronizeStore(
     });
 
     try {
-      const response = await fetch(DATA_ENDPOINT, {
+      const response = await hubApiFetch(DATA_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ store, data: batch }),
@@ -133,7 +134,7 @@ export async function pushToSuite(
 
 export async function checkBridgeConnection(): Promise<boolean> {
   try {
-    const response = await fetch(STATUS_ENDPOINT, { signal: AbortSignal.timeout(8_000) });
+    const response = await hubApiFetch(STATUS_ENDPOINT, { signal: AbortSignal.timeout(8_000) });
     if (!response.ok) return false;
     const body = await response.json() as { serverStorage?: unknown; canonicalSuiteData?: unknown };
     return body.serverStorage === true && body.canonicalSuiteData === true;

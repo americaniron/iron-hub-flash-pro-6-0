@@ -17,6 +17,7 @@ import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContact
 import { activityBridge } from './services/activityBridge.ts';
 import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
 import { calculateQuoteFinancials } from './services/documentMath.ts';
+import { hubApiFetch } from './services/hubApi.ts';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
 const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
@@ -65,7 +66,7 @@ const useAuthenticatedUser = (): {
 
     const loadSession = async () => {
       try {
-        const response = await fetch('/api/hub-session', {
+        const response = await hubApiFetch('/api/hub-session', {
           headers: { Accept: 'application/json' },
           cache: 'no-store',
           credentials: 'same-origin',

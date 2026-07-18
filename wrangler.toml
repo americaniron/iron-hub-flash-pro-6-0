@@ -1,2 +1,6 @@
 name = "iron-hub-flash-pro-6-0"
 pages_build_output_dir = "dist"
+compatibility_date = "2026-06-05"
+
+[vars]
+SUITE_API_URL = "https://fixmyiron-suite-api.americanironadmin.workers.dev"

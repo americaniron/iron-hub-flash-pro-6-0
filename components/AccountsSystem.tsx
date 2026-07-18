@@ -4,6 +4,7 @@ import { User, CustomerAccount, InvoiceData, Payment, SavedQuote } from '../type
 import { PaymentReceipt } from './PaymentReceipt.tsx';
 import { exportContacts } from '../services/exportService.ts';
 import { readSpreadsheetRows } from '../services/spreadsheetService.ts';
+import { hubApiFetch } from '../services/hubApi.ts';
 import { Download, FileSpreadsheet, FileText, RefreshCw } from 'lucide-react';
 
 type EmailDispatchResult = {
@@ -186,7 +187,7 @@ const PaymentReceiptModal: React.FC<{
     try {
       const dataUri = await generateReceiptPdf();
       if (!dataUri) throw new Error('Failed to render receipt PDF');
-      const res = await fetch('/api/send-email', {
+      const res = await hubApiFetch('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
