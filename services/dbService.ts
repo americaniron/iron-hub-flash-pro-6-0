@@ -22,6 +22,28 @@ const INTERNAL_STORE_NAMES = [...STORE_NAMES, 'sync_outbox'];
 const CANONICAL_STORES = new Set(['accounts', 'quotes', 'invoices', 'payments', 'inventory']);
 const CANONICAL_SYNC_BATCH_SIZE = 50;
 
+// The canonical Suite inventory endpoint only accepts https:// or Suite asset
+// URLs in imageUrl and rejects the ENTIRE batch otherwise (HTTP 422:
+// "Every item imageUrl must be an HTTPS URL or a Suite asset URL"). PDF-extracted
+// and AI-generated images are base64 data: URLs, so they must never be sent to
+// the server for the inventory store. They remain in the local cache and in the
+// parts_image_pool store, which does accept base64 payloads.
+const HTTPS_URL_PATTERN = /^https:\/\//i;
+
+export function sanitizeInventoryForServer(parts: InventoryPart[]): Array<Omit<InventoryPart, 'originalImages'>> {
+  return parts.map((part) => {
+    const { originalImages: _dropped, ...rest } = part;
+    const clean: Omit<InventoryPart, 'originalImages'> = { ...rest };
+    if (typeof clean.imageUrl === 'string' && !HTTPS_URL_PATTERN.test(clean.imageUrl)) {
+      delete clean.imageUrl;
+    }
+    return clean;
+  });
+}
+
+const poolKeyFor = (partNo: string, description: string): string =>
+  `${partNo}_${description}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
 export type CloudWriteResult = {
   synced: boolean;
   cached: boolean;
@@ -82,12 +104,17 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
   if (CANONICAL_STORES.has(store) && Array.isArray(data) && data.length === 0) {
     return false;
   }
-  const batches = CANONICAL_STORES.has(store) && Array.isArray(data)
-    ? Array.from({ length: Math.ceil(data.length / CANONICAL_SYNC_BATCH_SIZE) }, (_, index) => data.slice(index * CANONICAL_SYNC_BATCH_SIZE, (index + 1) * CANONICAL_SYNC_BATCH_SIZE))
-    : [data];
+  const payload = store === 'inventory' && Array.isArray(data)
+    ? sanitizeInventoryForServer(data as InventoryPart[])
+    : data;
+  const batches = CANONICAL_STORES.has(store) && Array.isArray(payload)
+    ? Array.from({ length: Math.ceil(payload.length / CANONICAL_SYNC_BATCH_SIZE) }, (_, index) => payload.slice(index * CANONICAL_SYNC_BATCH_SIZE, (index + 1) * CANONICAL_SYNC_BATCH_SIZE))
+    : [payload];
 
+  let allDelivered = true;
   for (const batch of batches) {
     let delivered = false;
+    let rejectedByValidation = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const res = await fetch(API_BASE, {
@@ -100,15 +127,26 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
           delivered = true;
           break;
         }
-        if (res.status < 500 && res.status !== 409 && res.status !== 422) return false;
+        if (res.status === 409 || res.status === 422) {
+          // Permanent validation rejection — retrying the same payload cannot
+          // succeed, and one bad batch must not block the batches after it
+          // (that is how newly indexed parts were silently lost).
+          rejectedByValidation = true;
+          break;
+        }
+        if (res.status < 500) return false;
       } catch {
         // Retry transient network and Worker failures before using local fallback.
       }
       await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
     }
+    if (rejectedByValidation) {
+      allDelivered = false;
+      continue;
+    }
     if (!delivered) return false;
   }
-  return true;
+  return allDelivered;
 }
 
 async function serverGetAll(username: string): Promise<Record<string, any> | null> {
@@ -507,7 +545,24 @@ export const dbService = {
 
   // --- Inventory Operations ---
   async getInventory(username: string): Promise<InventoryPart[]> {
-    return getData<InventoryPart[]>('inventory', username, []);
+    const parts = await getData<InventoryPart[]>('inventory', username, []);
+    if (parts.length === 0 || parts.every(p => p.imageUrl)) return parts;
+    // The canonical server store strips base64 image fields, so parts coming
+    // back from the server have no photos. Rehydrate them from the
+    // parts_image_pool, which persists base64 images server-side.
+    try {
+      const pool = await this.getPartsImagePool(username);
+      if (pool && Object.keys(pool).length > 0) {
+        return parts.map(part => {
+          if (part.imageUrl) return part;
+          const pooled = pool[poolKeyFor(part.partNo, part.description)];
+          return pooled ? { ...part, imageUrl: pooled } : part;
+        });
+      }
+    } catch {
+      // Hydration is cosmetic — never let it break inventory reads.
+    }
+    return parts;
   },
 
   async saveInventory(username: string, inventory: InventoryPart[]): Promise<CloudWriteResult> {
@@ -554,15 +609,13 @@ export const dbService = {
     if (images.length === 0) return { synced: true, cached: true };
     const pool = await this.getPartsImagePool(username);
     for (const img of images) {
-      const key = `${img.partNo}_${img.description}`.replace(/[^a-zA-Z0-9_]/g, '_');
-      pool[key] = img.imageUrl;
+      pool[poolKeyFor(img.partNo, img.description)] = img.imageUrl;
     }
     return this.savePartsImagePool(username, pool);
   },
 
   async findImageInPool(username: string, partNo: string, description: string): Promise<string | null> {
     const pool = await this.getPartsImagePool(username);
-    const key = `${partNo}_${description}`.replace(/[^a-zA-Z0-9_]/g, '_');
-    return pool[key] || null;
+    return pool[poolKeyFor(partNo, description)] || null;
   }
 };
