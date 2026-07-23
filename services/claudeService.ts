@@ -248,16 +248,25 @@ export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): P
         temperature: 0.1,
         messages: [{ role: 'user', content: translationPrompt }],
       });
-      const translated = translatedResponse.text || text;
+      const translated = (translatedResponse.text || '').trim();
 
-      if (translated && translated !== text) {
-        textToSpeak = translated;
+      // The voice model picks its language from the text itself, so silently
+      // falling back to the English source produced an English voice reading
+      // the English brief whenever translation failed. Arabic was requested:
+      // either speak real Arabic or fail loudly so the UI can say so.
+      if (!translated || !containsArabic(translated)) {
+        throw new Error('Arabic translation was unavailable, so Arabic voice analysis was not generated. Please retry.');
       }
+      textToSpeak = translated;
     }
 
     const resp = await callVoiceSynthesis(textToSpeak);
     return resp.audioBase64 || null;
-  }, () => null);
+  }, (error) => {
+    // Surface voice failures (e.g. Arabic translation unavailable) to the UI
+    // instead of silently producing no audio.
+    throw error instanceof Error ? error : new Error('Voice analysis is temporarily unavailable.');
+  });
 };
 
 /**

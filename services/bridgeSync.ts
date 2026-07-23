@@ -8,6 +8,9 @@
  */
 import { hubApiFetch } from './hubApi.ts';
 
+import { sanitizeInventoryForServer } from './dbService.ts';
+import type { InventoryPart } from '../types.ts';
+
 const DATA_ENDPOINT = '/api/data';
 const STATUS_ENDPOINT = '/api/data-status';
 const MAX_BATCH_SIZE = 50;
@@ -116,7 +119,12 @@ export async function pushToSuite(
   onProgress?.({ stage: 'preparing', detail: 'Preparing canonical Suite records', percent: 0 });
   for (let index = 0; index < orderedStores.length; index += 1) {
     const store = orderedStores[index];
-    const records = Array.isArray(data[store]) ? data[store] : [];
+    const rawRecords = Array.isArray(data[store]) ? data[store] as unknown[] : [];
+    // The Suite Worker rejects base64 data: image URLs on the canonical
+    // inventory endpoint (422) — send part data without them.
+    const records = store === 'inventory'
+      ? sanitizeInventoryForServer(rawRecords as InventoryPart[])
+      : rawRecords;
     await synchronizeStore(store, records, result, index, orderedStores.length, onProgress);
     if (records.length > 0 && result[store].failed === 0 && result[store].pushed === records.length) {
       await db.markCanonicalStoresSynchronized?.(username, [store]);

@@ -15,6 +15,11 @@ function cleanDescription(text: string): string {
   let cleaned = String(text)
     .replace(/\/\/parts\.cat\.com\/[^\s]*/gi, '')
     .replace(/https?:\/\/[^\s]+/gi, '')
+    // pdf.js tokenizes the parts.cat.com page footer so "https" arrives as a
+    // standalone token (the "://..." part is removed above) — drop it and any
+    // orphaned query-string fragments so they can't contaminate descriptions.
+    .replace(/\bhttps?\b/gi, '')
+    .replace(/\b(?:SingleShipmentOrderSummaryView|langId|storeId|catalogId)\S*/gi, '')
     // Aggressive vendor removal - covering all known suppliers
     .replace(/Ring Power|RING POWER CORPORATION|Industrial Parts Depot|IPD|COSTEX|CAT|CTP|Costex Tractor Parts|Trak-Tek|Heavy Equipment|Replacement Parts|Genuine Parts|Aftermarket|Kelly Tractor|Pantropic|Thompson Tractor/gi, "")
     // Metadata/Location removal
@@ -28,8 +33,12 @@ function cleanDescription(text: string): string {
     .replace(/[\|:]/g, " ")
     .trim();
 
-  // Remove leading line indices like "1) ", "31. "
-  cleaned = cleaned.replace(/^(?:\d+[\s)\.]*)+/, "");
+  // Remove leading line indices like "1) ", "31. " — but ONLY when followed by
+  // an explicit ")" or ". " delimiter. The old pattern (^(?:\d+[\s)\.]*)+) also
+  // consumed the leading digits of real specifications, turning
+  // "7/16-20 Thread" into "/16-20 Thread" and "33.00mm Long" into "mm Long".
+  cleaned = cleaned.replace(/^(?:\d{1,3}\)\s*)+/, "");
+  cleaned = cleaned.replace(/^(?:\d{1,3}\.\s+)+/, "");
   return cleaned.replace(/\s{2,}/g, " ").trim();
 }
 
@@ -853,14 +862,26 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
                     let imgData: any = null;
                     if (fn === pdfjs.OPS.paintImageXObject) {
                         const imgKey = args[0];
-                        try {
-                            imgData = page.objs.get(imgKey);
-                            if (imgData instanceof Promise) {
-                                imgData = await imgData;
+                        // With the pdf.js worker enabled, image objects resolve
+                        // asynchronously after getOperatorList() returns. The
+                        // synchronous objs.get(key) THROWS "Requesting object that
+                        // isn't resolved yet" for every part photo, which the old
+                        // catch turned into a silent skip — quotes lost all their
+                        // images. The callback form waits for resolution; a 3s
+                        // timeout keeps a corrupt object from hanging the parse.
+                        imgData = await new Promise<any>((resolve) => {
+                            let settled = false;
+                            const timer = setTimeout(() => {
+                                if (!settled) { settled = true; resolve(null); }
+                            }, 3000);
+                            try {
+                                page.objs.get(imgKey, (data: any) => {
+                                    if (!settled) { settled = true; clearTimeout(timer); resolve(data); }
+                                });
+                            } catch {
+                                if (!settled) { settled = true; clearTimeout(timer); resolve(null); }
                             }
-                        } catch {
-                            imgData = null;
-                        }
+                        });
                     } else {
                         imgData = args[0];
                     }

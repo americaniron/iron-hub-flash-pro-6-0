@@ -623,15 +623,19 @@ const App: React.FC = () => {
     if (!user || !clientData.company) return false;
     let existingAccount = clientData.id ? customerAccounts.find(acc => acc.id === clientData.id) : customerAccounts.find(acc => acc.company.toLowerCase() === clientData.company.toLowerCase());
     let updatedAccounts;
+    let savedAccount: CustomerAccount;
     if (existingAccount) {
-      updatedAccounts = customerAccounts.map(acc => acc.id === existingAccount!.id ? { ...existingAccount, ...clientData } : acc);
+      savedAccount = { ...existingAccount, ...clientData };
+      updatedAccounts = customerAccounts.map(acc => acc.id === existingAccount!.id ? savedAccount : acc);
     } else {
-      const newAccount: CustomerAccount = { ...clientData, id: `ACC-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}` };
-      updatedAccounts = [...customerAccounts, newAccount];
+      savedAccount = { ...clientData, id: `ACC-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}` };
+      updatedAccounts = [...customerAccounts, savedAccount];
     }
     setCustomerAccounts(updatedAccounts);
     setSyncStatus('syncing');
-    const sync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    // One-record upsert (see upsertCustomerAccount): avoids the Worker's
+    // 15-minute hub-data rate limit that full-collection saves kept hitting.
+    const sync = await dbService.upsertCustomerAccount(user.username, savedAccount, updatedAccounts);
     if (!sync.synced) {
       setSyncStatus('error');
       alert(canonicalSyncFailureMessage('Customer'));
@@ -832,7 +836,10 @@ const App: React.FC = () => {
     setCustomerAccounts(updatedAccounts);
     setClient(clientAccount);
     setSyncStatus('syncing');
-    const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+    // Sync only the customer this invoice needs (1 request). Pushing all
+    // accounts here burned the Worker's 15-minute rate limit and made this
+    // step fail with a selected customer (verified live: HTTP 429).
+    const accountSync = await dbService.upsertCustomerAccount(user.username, clientAccount, updatedAccounts);
     if (!accountSync.synced) {
       setSyncStatus('error');
       alert(canonicalSyncFailureMessage('Customer required for the invoice'));
@@ -910,7 +917,9 @@ const App: React.FC = () => {
         : [...customerAccounts, customer];
       setCustomerAccounts(updatedAccounts);
       setClient(customer);
-      const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
+      // One-record upsert: avoids re-posting every account and tripping the
+      // Worker's 15-minute hub-data rate limit (verified live: HTTP 429).
+      const accountSync = await dbService.upsertCustomerAccount(user.username, customer, updatedAccounts);
       if (!accountSync.synced) {
         setSyncStatus('error');
         alert(canonicalSyncFailureMessage('Customer required for the quote'));
