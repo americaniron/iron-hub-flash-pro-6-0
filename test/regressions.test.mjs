@@ -37,7 +37,10 @@ test('email dispatch has an enforceable deadline, idempotent retries, and only r
   assert.match(email, /45_000/);
   assert.match(email, /response\.ok && result\.success === true/);
   assert.match(worker, /function hubAttachmentPayload/);
-  assert.match(worker, /application\\\/pdf\|audio\\\/mpeg/);
+  // PDF and MP3 attachments must stay supported whether the Worker validates via
+  // the legacy (application\/pdf|audio\/mpeg) regex or the newer extension map.
+  assert.match(worker, /application\\?\/pdf/);
+  assert.match(worker, /audio\\?\/mpeg/);
   assert.match(worker, /filename=\[A-Za-z0-9\._ -\]\{1,240\}/);
   assert.match(worker, /async function routeHubEmailDispatch/);
   assert.match(worker, /Idempotency-Key/);

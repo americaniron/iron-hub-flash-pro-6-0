@@ -115,7 +115,8 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
   for (const batch of batches) {
     let delivered = false;
     let rejectedByValidation = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let rateLimited = false;
       try {
         const res = await fetch(API_BASE, {
           method: 'POST',
@@ -134,11 +135,20 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
           rejectedByValidation = true;
           break;
         }
-        if (res.status < 500) return false;
+        if (res.status === 429) {
+          // The Suite Worker rate-limits hub synchronization per 15-minute
+          // window. Verified live: bulk saves returned 429 "Too many iron hub
+          // synchronization requests", which the old code treated as a permanent
+          // failure — that is what blocked invoice creation with a selected
+          // customer. Back off and retry before giving up.
+          rateLimited = true;
+        } else if (res.status < 500) {
+          return false;
+        }
       } catch {
         // Retry transient network and Worker failures before using local fallback.
       }
-      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, (rateLimited ? 1500 : 300) * (attempt + 1)));
     }
     if (rejectedByValidation) {
       allDelivered = false;
@@ -400,6 +410,26 @@ export const dbService = {
     return setData('accounts', username, accounts);
   },
 
+  /**
+   * Upsert a single customer account. The canonical Suite endpoint is
+   * upsert-based, so syncing one changed record costs 1 request instead of the
+   * whole collection (3+ batches) — which matters because the Worker
+   * rate-limits hub writes per 15-minute window (verified live: bulk account
+   * saves returned HTTP 429 and blocked invoice creation). The full collection
+   * is still cached locally, and queued for a later full sync only on failure.
+   */
+  async upsertCustomerAccount(username: string, account: CustomerAccount, allAccounts: CustomerAccount[]): Promise<CloudWriteResult> {
+    const isUp = await checkServerAvailability(true);
+    const cached = await localSet('accounts', username, allAccounts);
+    if (!isUp) {
+      await rememberPendingCanonicalWrite(username, 'accounts', allAccounts);
+      return { synced: false, cached };
+    }
+    const synced = await serverSet(username, 'accounts', [account]);
+    if (!synced) await rememberPendingCanonicalWrite(username, 'accounts', allAccounts);
+    return { synced, cached };
+  },
+
   // --- Quote Archive Operations ---
   async getQuotes(username: string): Promise<SavedQuote[]> {
     return getData<SavedQuote[]>('quotes', username, []);
@@ -570,6 +600,7 @@ export const dbService = {
   },
 
   async addOrUpdateInventoryParts(username: string, newParts: InventoryPart[]): Promise<CloudWriteResult> {
+    if (newParts.length === 0) return { synced: true, cached: true };
     const currentInventory = await this.getInventory(username);
     const inventoryMap = new Map(currentInventory.map(p => [p.partNo, p]));
 
@@ -589,7 +620,21 @@ export const dbService = {
       }
     }
 
-    return this.saveInventory(username, Array.from(inventoryMap.values()));
+    const fullInventory = Array.from(inventoryMap.values());
+    // The canonical Suite endpoint is upsert-based, so only the parts from THIS
+    // quote need to go over the wire — 1 request instead of re-posting the
+    // whole (1000+ part) inventory in 20+ batches, which burned through the
+    // Worker's 15-minute rate limit (verified live: HTTP 429) and made later
+    // saves like accounts/invoices fail.
+    const isUp = await checkServerAvailability();
+    const cached = await localSet('inventory', username, fullInventory);
+    if (!isUp) {
+      await rememberPendingCanonicalWrite(username, 'inventory', fullInventory);
+      return { synced: false, cached };
+    }
+    const synced = await serverSet(username, 'inventory', newParts);
+    if (!synced) await rememberPendingCanonicalWrite(username, 'inventory', fullInventory);
+    return { synced, cached };
   },
 
   // --- Parts Image Pool Operations ---
