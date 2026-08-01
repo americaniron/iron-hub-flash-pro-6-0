@@ -217,22 +217,25 @@ test('Hub AI uses Claude first, then a scoped Cloudflare GPT fallback, and passe
   assert.match(claudeService, /English voice analysis requires a verified English translation/);
   assert.doesNotMatch(claudeService, /deviceFallback/);
   assert.match(worker, /Voice analysis language must be en or ar/);
-  assert.match(worker, /model = "xai\/grok-tts"/);
-  assert.match(worker, /language: "ar-SA"/);
-  assert.match(worker, /output_format: \{ codec: "wav", sample_rate: 44100 \}/);
+  assert.match(worker, /@cf\/myshell-ai\/melotts/);
+  assert.match(worker, /lang: language/);
+  assert.match(worker, /encoding: "linear16"/);
+  assert.match(worker, /container: "wav"/);
+  assert.match(worker, /sample_rate: 24e3/);
   assert.match(worker, /@cf\/deepgram\/aura-2-en/);
   assert.match(worker, /@cf\/deepgram\/aura-1/);
   assert.match(worker, /speaker: "apollo"/);
   assert.match(worker, /returnRawResponse: true/);
   assert.match(worker, /A lower-quality device voice will not be substituted/);
-  assert.match(worker, /mimeType: "audio\/wav"/);
-  assert.match(app, /new Blob\(\[bytes\], \{ type: 'audio\/wav' \}\)/);
+  assert.match(worker, /let mimeType = "audio\/wav"/);
+  assert.match(app, /new Blob\(\[bytes\], \{ type: mimeType \}\)/);
   assert.doesNotMatch(app, /speechSynthesis|SpeechSynthesisUtterance/);
   assert.match(app, /Promise\.race\(\[/);
   assert.match(app, /Voice playback did not start before browser activation expired/);
-  assert.match(app, /AI-Analysis-\$\{config\.quoteId\}\.wav/);
-  assert.match(quotePreview, /data:audio\/wav;base64/);
-  assert.match(email, /Voice_Analysis_\$\{config\?\.ttsLanguage\?\.toUpperCase\(\) \|\| 'EN'\}\.wav/);
+  assert.match(app, /AI-Analysis-\$\{config\.quoteId\}\.\$\{audioMimeType === 'audio\/mpeg' \? 'mp3' : 'wav'\}/);
+  assert.match(quotePreview, /data:\$\{mimeType\};base64/);
+  assert.match(email, /const mimeType = base64Audio\.match/);
+  assert.match(email, /const extension = mimeType === 'audio\/mpeg' \? 'mp3' : 'wav'/);
 });
 
 test('quote diagnosis ignores supplier metadata and cannot invent an unsupported repair scope', () => {

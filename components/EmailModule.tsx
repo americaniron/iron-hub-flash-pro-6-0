@@ -202,7 +202,9 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
       const base64Audio = await getAudioAttachment();
       if (base64Audio) {
         const bytes = attachmentBytesFromDataUrl(base64Audio);
-        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.wav`;
+        const mimeType = base64Audio.match(/^data:([^;]+);/i)?.[1]?.toLowerCase() || 'audio/wav';
+        const extension = mimeType === 'audio/mpeg' ? 'mp3' : 'wav';
+        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.${extension}`;
 
         if (!stagedAttachments.some(a => a.filename === filename)) {
           setStagedAttachments(prev => [...prev, {

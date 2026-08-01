@@ -11,6 +11,7 @@ function normalizePdfText(text: string): string {
   return String(text || '')
     .replace(/[\u2212\u2013\u2014]/g, '-')
     .replace(/\bS\s*T\s*A\s*T\s*U\s*S\s*:?/gi, 'STATUS:')
+    .replace(/\bC\s*O\s*R\s*E\b/gi, 'CORE')
     .replace(/\bL\s*I\s*N\s*E\b/gi, 'LINE')
     .replace(/\s+/g, ' ')
     .trim();
@@ -21,6 +22,7 @@ function cleanDescription(text: string): string {
   if (!text) return "";
 
   let cleaned = normalizePdfText(text)
+    .replace(/[®™©]/g, ' ')
     .replace(/\/\/parts\.cat\.com\/[^\s]*/gi, ' ')
     .replace(/https?:\/\/[^\s]*/gi, ' ')
     .replace(/\bhttps?\b|\blangid\s*=\s*[^\s]+|\b(?:SingleShipmentOrderSummaryView|storeId|catalogId)\S*/gi, ' ')
@@ -43,6 +45,91 @@ function cleanDescription(text: string): string {
     .trim();
 
   return cleaned;
+}
+
+/**
+ * Parses the line-oriented Caterpillar/American Iron quote layout.
+ * These documents print the real row on one line and put weight, notes,
+ * status, and core-deposit details on following lines. A generic table
+ * parser cannot safely distinguish those continuation lines from new rows.
+ */
+function parseAmericanIronPage(textLines: { y: number, text: string }[]): { items: QuoteItem[], yCoords: number[] } {
+  const items: QuoteItem[] = [];
+  const yCoords: number[] = [];
+  const normalizedLines = textLines.map(line => ({
+    ...line,
+    text: normalizePdfText(line.text)
+  }));
+  const hasHeader = normalizedLines.some(({ text }) =>
+    /\bLIN\b.*\bPART\s+NUMBER\b.*\bDESCRIPTION\b.*\bQTY\b.*\bUNIT\s+VAL\b/i.test(text)
+  );
+  const rowPattern = /^\s*(\d{1,3})\s+([A-Z0-9][A-Z0-9-]{3,24})\s+(.*?)\s+(\d+)\s+\$?\s*([\d,]+\.\d{2})\s+\$?\s*([\d,]+\.\d{2})\s*$/i;
+  const rowStartPattern = /^\s*\d{1,3}\s+[A-Z0-9][A-Z0-9-]{3,24}\b/i;
+  const summaryPattern = /^(?:ORDER SUBTOTAL|ORDER TOTAL|SUMMARY|TOTAL DUE|TERMS|SHIPPING|TAX)\b/i;
+
+  let currentItem: QuoteItem | null = null;
+  let currentY = 0;
+
+  const pushCurrent = () => {
+    if (!currentItem) return;
+    currentItem.desc = cleanDescription(currentItem.desc);
+    currentItem.notes = cleanDescription(currentItem.notes || '');
+    items.push(currentItem);
+    yCoords.push(currentY);
+    currentItem = null;
+  };
+
+  for (const line of normalizedLines) {
+    const text = line.text.trim();
+    if (!text) continue;
+    if (summaryPattern.test(text)) break;
+
+    const rowMatch = text.match(rowPattern);
+    if (rowMatch) {
+      pushCurrent();
+      currentItem = {
+        lineNo: rowMatch[1],
+        qty: parseInt(rowMatch[4], 10),
+        partNo: rowMatch[2],
+        desc: '',
+        weight: 0,
+        unitPrice: Math.round(parseFloat(rowMatch[5].replace(/,/g, '')) * 100) / 100,
+        coreDeposit: 0,
+        availability: '',
+        notes: '',
+        originalImages: []
+      };
+      currentY = line.y;
+      processItemLine(currentItem, rowMatch[3]);
+      continue;
+    }
+
+    // A malformed row must not steal a continuation line such as "25 LBS".
+    if (rowStartPattern.test(text)) continue;
+    if (!currentItem) continue;
+
+    const compactCoreText = text.replace(/(?<=\d)\s+(?=\d)/g, '');
+    const coreMatch = compactCoreText.match(/\bCORE\s*:?\s*\$?\s*([\d,]+\.\d{2})\b/i);
+    if (coreMatch) {
+      currentItem.coreDeposit = Math.round(parseFloat(coreMatch[1].replace(/,/g, '')) * 100) / 100;
+      const remainder = compactCoreText.replace(coreMatch[0], ' ').trim();
+      if (remainder) processItemLine(currentItem, remainder);
+      continue;
+    }
+
+    // The catalog often prints this label beside the part weight. It is
+    // core metadata, not an engineering description belonging on the quote.
+    if (/\b(?:INJECTOR\s+)?CORE\s+DEPOSIT\b/i.test(text)) {
+      const remainder = text.replace(/\b(?:INJECTOR\s+)?CORE\s+DEPOSIT\b/gi, ' ').trim();
+      if (remainder) processItemLine(currentItem, remainder);
+      continue;
+    }
+
+    processItemLine(currentItem, text);
+  }
+
+  pushCurrent();
+  return hasHeader || items.length > 0 ? { items, yCoords } : { items: [], yCoords: [] };
 }
 
 /**
@@ -724,7 +811,8 @@ function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCo
 
 export const parseTextData = (text: string): QuoteItem[] => {
   const lines = text.split('\n').map((l, i) => ({ y: i * 20, text: l }));
-  let result = parseRingPowerPage(lines);
+  let result = parseAmericanIronPage(lines);
+  if (result.items.length === 0) result = parseRingPowerPage(lines);
   if (result.items.length === 0) result = parseFallback(lines);
   if (result.items.length === 0) result = parseFuzzy(lines);
   return result.items;
@@ -824,10 +912,16 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
         pageItems = result.items;
         yCoords = result.yCoords;
     } else {
-        const tableResult = parseTableBasedPage(rawItems);
-        if (tableResult.items.length > 0) {
-            pageItems = tableResult.items;
-            yCoords = tableResult.yCoords;
+        const americanIronResult = parseAmericanIronPage(textLines);
+        if (americanIronResult.items.length > 0) {
+            pageItems = americanIronResult.items;
+            yCoords = americanIronResult.yCoords;
+        } else {
+            const tableResult = parseTableBasedPage(rawItems);
+            if (tableResult.items.length > 0) {
+                pageItems = tableResult.items;
+                yCoords = tableResult.yCoords;
+            }
         }
     }
     
