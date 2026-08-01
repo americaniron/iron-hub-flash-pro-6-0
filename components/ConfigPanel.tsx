@@ -804,8 +804,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         </div>
       </div>
 
-      <div className="fixed bottom-8 left-1/2 -translate-x-1/2 glass p-3 rounded-full shadow-2xl z-[150] flex items-center gap-3 border-2 border-cat-yellow/20">
-        <button onClick={() => props.onAnalyze(useThinking)} disabled={props.isAnalyzing || props.itemsCount === 0} className="w-14 h-14 bg-cat-yellow text-cat-black rounded-full flex items-center justify-center btn-app group shadow-lg shadow-cat-yellow/20">
+      <div className="fixed bottom-8 left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 glass p-3 rounded-full shadow-2xl z-[150] flex flex-nowrap items-center justify-start gap-3 border-2 border-cat-yellow/20 max-w-[calc(100vw-1rem)] overflow-x-auto">
+        <button onClick={() => props.onAnalyze(useThinking)} disabled={props.isAnalyzing || props.itemsCount === 0} aria-label="Generate AI diagnosis" title="Generate AI diagnosis" className="w-14 h-14 shrink-0 bg-cat-yellow text-cat-black rounded-full flex items-center justify-center btn-app group shadow-lg shadow-cat-yellow/20">
           {props.isAnalyzing ? <div className="w-6 h-6 border-2 border-cat-black/20 border-t-cat-black rounded-full animate-spin"></div> : <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>}
         </button>
         {props.config.photoMode === PhotoMode.AI && (

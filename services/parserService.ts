@@ -58,7 +58,13 @@ function parseAmericanIronPage(textLines: { y: number, text: string }[]): { item
   const yCoords: number[] = [];
   const normalizedLines = textLines.map(line => ({
     ...line,
-    text: normalizePdfText(line.text)
+    // Only collapse dash spacing in the part-number column. A global
+    // replacement would turn descriptions such as "GROUP- 1" into a
+    // quantity-less token.
+    text: normalizePdfText(line.text).replace(
+      /^(\s*\d{1,3}\s+)([A-Z0-9]+)\s*-\s*([A-Z0-9]+)/i,
+      '$1$2-$3'
+    )
   }));
   const hasHeader = normalizedLines.some(({ text }) =>
     /\bLIN\b.*\bPART\s+NUMBER\b.*\bDESCRIPTION\b.*\bQTY\b.*\bUNIT\s+VAL\b/i.test(text)
@@ -838,10 +844,10 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
 
 export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], clientInfo: Partial<ClientInfo>}> => {
   if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('PDF files must be between 1 byte and 10 MB.');
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   // The Suite proxy rewrites this emitted /assets URL into /hub-proxy/assets.
   // Keeping the client value untouched prevents a second proxy prefix after
   // Vite folds this imported URL into the production bundle.
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;

@@ -256,6 +256,16 @@ test('quote diagnosis ignores supplier metadata and cannot invent an unsupported
   assert.doesNotMatch(claudeService, /Identify any CRITICAL MISSING COMPONENTS/);
 });
 
+test('Caterpillar quote rows accept spaced dash part numbers and keep continuation metadata out of descriptions', () => {
+  const parser = hub('services/parserService.ts');
+
+  assert.match(parser, /text: normalizePdfText\(line\.text\)\.replace\(/);
+  assert.match(parser, /const rowPattern = \/\^\\s\*\(\\d\{1,3\}\)/);
+  assert.match(parser, /CORE\\s\+DEPOSIT/);
+  assert.match(parser, /item\.weight = weightResult\.weight/);
+  assert.match(parser, /item\.availability =/);
+});
+
 test('canonical Hub writes resolve Suite identities securely and do not silently claim local persistence is synchronized', () => {
   const worker = suiteWorker();
   const data = hub('services/dbService.ts');
