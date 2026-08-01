@@ -14,6 +14,7 @@ interface QuotePreviewProps {
   customLogo: string | null;
   isGeneratingImages: boolean;
   audioData: string | null;
+  audioMimeType?: string;
   onConfigChange?: (config: AppConfig) => void;
 }
 
@@ -24,10 +25,9 @@ const formatCurrency = (amount: number) => {
   });
 };
 
-// ElevenLabs TTS audio is returned as base64 MP3 by the service layer.
-const toWavDataUrl = (base64Audio: string): string => {
+const toAudioDataUrl = (base64Audio: string, mimeType = 'audio/wav'): string => {
   if (base64Audio.startsWith('data:')) return base64Audio;
-  return `data:audio/wav;base64,${base64Audio}`;
+  return `data:${mimeType};base64,${base64Audio}`;
 };
 
 const translations = {
@@ -161,7 +161,7 @@ const AddressBlock: React.FC<{ title: string; client: ClientInfo; isShipping?: b
   );
 };
 
-export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, config, aiAnalysis, customLogo, isGeneratingImages, audioData, onConfigChange }) => {
+export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, config, aiAnalysis, customLogo, isGeneratingImages, audioData, audioMimeType = 'audio/wav', onConfigChange }) => {
   const lang = config.documentLanguage || 'en';
   const isRtl = lang === 'ar';
   const t = translations[lang];
@@ -170,11 +170,11 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
   useEffect(() => {
     if (audioData) {
-      setAudioDataUrl(toWavDataUrl(audioData));
+      setAudioDataUrl(toAudioDataUrl(audioData, audioMimeType));
     } else {
       setAudioDataUrl(null);
     }
-  }, [audioData]);
+  }, [audioData, audioMimeType]);
   
   const { markedItems, subtotal, totalWeight, totalCoreDeposits, logistics, discount, creditOrRefund, total } = calculateQuoteFinancials(items, config);
 
@@ -511,7 +511,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
                     <div className={`mt-6 pt-5 border-t border-slate-200/80 print:mt-2 print:pt-2 print:border-slate-300 flex ${isRtl ? 'justify-end' : 'justify-start'}`}>
                       <a 
                         href={audioDataUrl} 
-                        download={`AI-Briefing-${config.quoteId}.wav`}
+                        download={`AI-Briefing-${config.quoteId}.${audioMimeType === 'audio/mpeg' ? 'mp3' : 'wav'}`}
                         className="inline-flex items-center gap-3 px-6 py-3 bg-cat-black text-cat-yellow rounded-xl text-[10px] font-black uppercase tracking-[0.2em] no-underline shadow-lg hover:bg-cat-dark hover:-translate-y-0.5 transition-all duration-300"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V3"></path></svg>

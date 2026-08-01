@@ -129,13 +129,13 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-// The server returns a validated RIFF/WAV payload. Preserve its actual MIME type
-// so native playback, downloads, and outbound attachments decode reliably.
-function base64ToWavBlob(base64: string): Blob {
+// Preserve the server-selected neural audio type so MeloTTS MP3 and Aura WAV
+// both play, download, and attach correctly.
+function base64ToAudioBlob(base64: string, mimeType = 'audio/wav'): Blob {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return new Blob([bytes], { type: 'audio/wav' });
+  return new Blob([bytes], { type: mimeType });
 }
 
 const canonicalSyncFailureMessage = (recordType: string) =>
@@ -194,6 +194,7 @@ const App: React.FC = () => {
   
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [audioData, setAudioData] = useState<string | null>(null);
+  const [audioMimeType, setAudioMimeType] = useState('audio/wav');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [customLogo, setCustomLogo] = useState<string | null>('/logo.png');
@@ -552,8 +553,10 @@ const App: React.FC = () => {
         currentAudioUrlRef.current = null;
       }
       const base64Audio = generatedVoice.audioBase64;
+      const mimeType = generatedVoice.mimeType || 'audio/wav';
       setAudioData(base64Audio); // Save base64 for download / email-attach
-      const url = URL.createObjectURL(base64ToWavBlob(base64Audio));
+      setAudioMimeType(mimeType);
+      const url = URL.createObjectURL(base64ToAudioBlob(base64Audio, mimeType));
       const audio = new Audio(url);
       currentAudioRef.current = audio;
       currentAudioUrlRef.current = url;
@@ -614,6 +617,7 @@ const App: React.FC = () => {
       currentAudioUrlRef.current = null;
     }
     setAudioData(null);
+    setAudioMimeType('audio/wav');
     setIsSpeaking(false);
     setConfig((previous) => ({ ...previous, ttsLanguage: language }));
   };
@@ -664,12 +668,12 @@ const App: React.FC = () => {
 
   const handleDownloadAudio = () => {
     if (!audioData) return;
-    const blob = base64ToWavBlob(audioData);
+    const blob = base64ToAudioBlob(audioData, audioMimeType);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = `AI-Analysis-${config.quoteId}.wav`;
+    a.download = `AI-Analysis-${config.quoteId}.${audioMimeType === 'audio/mpeg' ? 'mp3' : 'wav'}`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);
@@ -678,7 +682,7 @@ const App: React.FC = () => {
 
   const getAudioAttachment = async (): Promise<string | null> => {
     if (!audioData) return null;
-    const blob = base64ToWavBlob(audioData);
+    const blob = base64ToAudioBlob(audioData, audioMimeType);
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onloadend = () => {
@@ -1341,7 +1345,7 @@ const App: React.FC = () => {
             />
             <div className="no-print">{items.length > 0 && <ItemEditor items={items} onUpdate={setItems} config={config} onDeleteItem={(idx) => setItems(prev => prev.filter((_, i) => i !== idx))} currentUser={user} />}</div>
             <div ref={resultRef} className="quote-preview-container printable-area">
-              <QuotePreview items={items} client={client} config={config} aiAnalysis={aiAnalysis} customLogo={customLogo} isGeneratingImages={isGeneratingImages} audioData={audioData} onConfigChange={setConfig} />
+              <QuotePreview items={items} client={client} config={config} aiAnalysis={aiAnalysis} customLogo={customLogo} isGeneratingImages={isGeneratingImages} audioData={audioData} audioMimeType={audioMimeType} onConfigChange={setConfig} />
               {aiAnalysis && (
                 <div className="max-w-[1000px] mx-auto mt-4 px-12 no-print flex justify-end items-center gap-2">
                   <div className="flex gap-1 p-1 bg-slate-100 rounded-full">
@@ -1382,7 +1386,7 @@ const App: React.FC = () => {
                     <audio
                       controls
                       preload="metadata"
-                      src={`data:audio/wav;base64,${audioData}`}
+                      src={`data:${audioMimeType};base64,${audioData}`}
                       className="h-10 w-64"
                       aria-label={`${config.ttsLanguage === 'ar' ? 'Arabic' : 'English'} AI voice analysis`}
                     />
