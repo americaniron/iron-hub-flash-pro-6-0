@@ -23,6 +23,28 @@ const INTERNAL_STORE_NAMES = [...STORE_NAMES, 'sync_outbox'];
 const CANONICAL_STORES = new Set(['accounts', 'quotes', 'invoices', 'payments', 'inventory']);
 const CANONICAL_SYNC_BATCH_SIZE = 50;
 
+// The canonical Suite inventory endpoint only accepts https:// or Suite asset
+// URLs in imageUrl and rejects the ENTIRE batch otherwise (HTTP 422:
+// "Every item imageUrl must be an HTTPS URL or a Suite asset URL"). PDF-extracted
+// and AI-generated images are base64 data: URLs, so they must never be sent to
+// the server for the inventory store. They remain in the local cache and in the
+// parts_image_pool store, which does accept base64 payloads.
+const HTTPS_URL_PATTERN = /^https:\/\//i;
+
+export function sanitizeInventoryForServer(parts: InventoryPart[]): Array<Omit<InventoryPart, 'originalImages'>> {
+  return parts.map((part) => {
+    const { originalImages: _dropped, ...rest } = part;
+    const clean: Omit<InventoryPart, 'originalImages'> = { ...rest };
+    if (typeof clean.imageUrl === 'string' && !HTTPS_URL_PATTERN.test(clean.imageUrl)) {
+      delete clean.imageUrl;
+    }
+    return clean;
+  });
+}
+
+const poolKeyFor = (partNo: string, description: string): string =>
+  `${partNo}_${description}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
 export type CloudWriteResult = {
   synced: boolean;
   cached: boolean;
@@ -83,13 +105,19 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
   if (CANONICAL_STORES.has(store) && Array.isArray(data) && data.length === 0) {
     return false;
   }
-  const batches = CANONICAL_STORES.has(store) && Array.isArray(data)
-    ? Array.from({ length: Math.ceil(data.length / CANONICAL_SYNC_BATCH_SIZE) }, (_, index) => data.slice(index * CANONICAL_SYNC_BATCH_SIZE, (index + 1) * CANONICAL_SYNC_BATCH_SIZE))
-    : [data];
+  const payload = store === 'inventory' && Array.isArray(data)
+    ? sanitizeInventoryForServer(data as InventoryPart[])
+    : data;
+  const batches = CANONICAL_STORES.has(store) && Array.isArray(payload)
+    ? Array.from({ length: Math.ceil(payload.length / CANONICAL_SYNC_BATCH_SIZE) }, (_, index) => payload.slice(index * CANONICAL_SYNC_BATCH_SIZE, (index + 1) * CANONICAL_SYNC_BATCH_SIZE))
+    : [payload];
 
+  let allDelivered = true;
   for (const batch of batches) {
     let delivered = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    let rejectedByValidation = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let rateLimited = false;
       try {
         const res = await hubApiFetch(API_BASE, {
           method: 'POST',
@@ -101,15 +129,35 @@ async function serverSet(username: string, store: string, data: any): Promise<bo
           delivered = true;
           break;
         }
-        if (res.status < 500 && res.status !== 409 && res.status !== 422) return false;
+        if (res.status === 409 || res.status === 422) {
+          // Permanent validation rejection — retrying the same payload cannot
+          // succeed, and one bad batch must not block the batches after it
+          // (that is how newly indexed parts were silently lost).
+          rejectedByValidation = true;
+          break;
+        }
+        if (res.status === 429) {
+          // The Suite Worker rate-limits hub synchronization per 15-minute
+          // window. Verified live: bulk saves returned 429 "Too many iron hub
+          // synchronization requests", which the old code treated as a permanent
+          // failure — that is what blocked invoice creation with a selected
+          // customer. Back off and retry before giving up.
+          rateLimited = true;
+        } else if (res.status < 500) {
+          return false;
+        }
       } catch {
         // Retry transient network and Worker failures before using local fallback.
       }
-      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, (rateLimited ? 1500 : 300) * (attempt + 1)));
+    }
+    if (rejectedByValidation) {
+      allDelivered = false;
+      continue;
     }
     if (!delivered) return false;
   }
-  return true;
+  return allDelivered;
 }
 
 async function serverGetAll(username: string): Promise<Record<string, any> | null> {
@@ -367,6 +415,26 @@ export const dbService = {
     return setData('accounts', username, accounts);
   },
 
+  /**
+   * Upsert a single customer account. The canonical Suite endpoint is
+   * upsert-based, so syncing one changed record costs 1 request instead of the
+   * whole collection (3+ batches) — which matters because the Worker
+   * rate-limits hub writes per 15-minute window (verified live: bulk account
+   * saves returned HTTP 429 and blocked invoice creation). The full collection
+   * is still cached locally, and queued for a later full sync only on failure.
+   */
+  async upsertCustomerAccount(username: string, account: CustomerAccount, allAccounts: CustomerAccount[]): Promise<CloudWriteResult> {
+    const isUp = await checkServerAvailability(true);
+    const cached = await localSet('accounts', username, allAccounts);
+    if (!isUp) {
+      await rememberPendingCanonicalWrite(username, 'accounts', allAccounts);
+      return { synced: false, cached };
+    }
+    const synced = await serverSet(username, 'accounts', [account]);
+    if (!synced) await rememberPendingCanonicalWrite(username, 'accounts', allAccounts);
+    return { synced, cached };
+  },
+
   // --- Quote Archive Operations ---
   async getQuotes(username: string): Promise<SavedQuote[]> {
     return getData<SavedQuote[]>('quotes', username, []);
@@ -512,7 +580,24 @@ export const dbService = {
 
   // --- Inventory Operations ---
   async getInventory(username: string): Promise<InventoryPart[]> {
-    return getData<InventoryPart[]>('inventory', username, []);
+    const parts = await getData<InventoryPart[]>('inventory', username, []);
+    if (parts.length === 0 || parts.every(p => p.imageUrl)) return parts;
+    // The canonical server store strips base64 image fields, so parts coming
+    // back from the server have no photos. Rehydrate them from the
+    // parts_image_pool, which persists base64 images server-side.
+    try {
+      const pool = await this.getPartsImagePool(username);
+      if (pool && Object.keys(pool).length > 0) {
+        return parts.map(part => {
+          if (part.imageUrl) return part;
+          const pooled = pool[poolKeyFor(part.partNo, part.description)];
+          return pooled ? { ...part, imageUrl: pooled } : part;
+        });
+      }
+    } catch {
+      // Hydration is cosmetic — never let it break inventory reads.
+    }
+    return parts;
   },
 
   async saveInventory(username: string, inventory: InventoryPart[]): Promise<CloudWriteResult> {
@@ -520,6 +605,7 @@ export const dbService = {
   },
 
   async addOrUpdateInventoryParts(username: string, newParts: InventoryPart[]): Promise<CloudWriteResult> {
+    if (newParts.length === 0) return { synced: true, cached: true };
     const currentInventory = await this.getInventory(username);
     const inventoryMap = new Map(currentInventory.map(p => [p.partNo, p]));
 
@@ -539,7 +625,21 @@ export const dbService = {
       }
     }
 
-    return this.saveInventory(username, Array.from(inventoryMap.values()));
+    const fullInventory = Array.from(inventoryMap.values());
+    // The canonical Suite endpoint is upsert-based, so only the parts from THIS
+    // quote need to go over the wire — 1 request instead of re-posting the
+    // whole (1000+ part) inventory in 20+ batches, which burned through the
+    // Worker's 15-minute rate limit (verified live: HTTP 429) and made later
+    // saves like accounts/invoices fail.
+    const isUp = await checkServerAvailability();
+    const cached = await localSet('inventory', username, fullInventory);
+    if (!isUp) {
+      await rememberPendingCanonicalWrite(username, 'inventory', fullInventory);
+      return { synced: false, cached };
+    }
+    const synced = await serverSet(username, 'inventory', newParts);
+    if (!synced) await rememberPendingCanonicalWrite(username, 'inventory', fullInventory);
+    return { synced, cached };
   },
 
   // --- Parts Image Pool Operations ---
@@ -559,15 +659,13 @@ export const dbService = {
     if (images.length === 0) return { synced: true, cached: true };
     const pool = await this.getPartsImagePool(username);
     for (const img of images) {
-      const key = `${img.partNo}_${img.description}`.replace(/[^a-zA-Z0-9_]/g, '_');
-      pool[key] = img.imageUrl;
+      pool[poolKeyFor(img.partNo, img.description)] = img.imageUrl;
     }
     return this.savePartsImagePool(username, pool);
   },
 
   async findImageInPool(username: string, partNo: string, description: string): Promise<string | null> {
     const pool = await this.getPartsImagePool(username);
-    const key = `${partNo}_${description}`.replace(/[^a-zA-Z0-9_]/g, '_');
-    return pool[key] || null;
+    return pool[poolKeyFor(partNo, description)] || null;
   }
 };
