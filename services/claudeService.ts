@@ -42,17 +42,19 @@ async function callClaude(params: {
   return await response.json();
 }
 
-async function callVoiceSynthesis(text: string) {
+async function callVoiceSynthesis(text: string, language: 'en' | 'ar') {
   const response = await hubApiFetch("/api/elevenlabs-tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, language }),
     signal: AbortSignal.timeout(60_000),
   });
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.details || errorData.error || `Cloudflare voice synthesis error (${response.status})`);
+    const error = new Error(errorData.details || errorData.error || `Cloudflare voice synthesis error (${response.status})`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
 
   return await response.json();
@@ -195,28 +197,62 @@ export const translateText = async (text: string, targetLanguage: 'en' | 'ar'): 
   }, () => text);
 };
 
+export const quoteAnalysisDescription = (value: string): string => {
+  return String(value || '')
+    .replace(/https?\s*(?::\/\/)?\S*/gi, ' ')
+    .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/\bhttps?\s*\??/gi, ' ')
+    .replace(
+      /\s+[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2}(?:,\s*[A-Z]{2})?\s*\(\s*\d+\s*(?:-\s*\d*)?\s*(?:business\s*)?days?\s*\)/g,
+      ' ',
+    )
+    .replace(
+      /\s+[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2}(?:,\s*[A-Z]{2})?\s*\(\s*\d+\s*-\s*\)\s*$/g,
+      ' ',
+    )
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+};
+
+export const buildQuoteAnalysisPrompt = (items: QuoteItem[], language: 'en' | 'ar' = 'en'): string => {
+  const context = items.map((item, index) => ({
+    line: index + 1,
+    quantity: item.qty,
+    partNumber: String(item.partNo || '').trim(),
+    description: quoteAnalysisDescription(item.desc) || 'Description not provided',
+  }));
+
+  return `You are a senior heavy-equipment parts application specialist at American Iron.
+Review only the supplied quote line items:
+${JSON.stringify(context, null, 2)}
+
+Rules:
+- Use part numbers, quantities, and descriptions together as evidence. Part numbers can identify a component family, but fitment must still be confirmed against the machine serial number.
+- Supplier warehouse names, cities, availability, lead times, URLs, and extraction artifacts are operational metadata. Silently ignore them.
+- Never mention data integrity, corruption, merged fields, parser quality, URLs, or supplier metadata in the customer-facing brief.
+- Do not infer a complete repair scope, machine model, engine configuration, or absent components from a parts list alone.
+- Do not claim that unquoted parts are missing or required unless an explicit machine model and explicit repair scope are supplied. Neither is supplied here.
+- Do not invent compatibility, failure causes, maintenance intervals, delivery dates, prices, or safety findings.
+
+Task:
+1. Identify the likely machine subsystem or component families supported by the part numbers and descriptions.
+2. Explain the direct function of the main quoted component groups and how they relate, using calibrated language such as “appears to” or “likely” when fitment is not explicit.
+3. End with one practical verification recommendation supported by the quote, such as confirming part-number fitment and quantities against the machine serial number.
+
+Output one concise, customer-safe analysis of 3-5 sentences with no warning preamble or parser commentary.
+${language === 'ar' ? 'Write the entire paragraph in Arabic.' : 'Write the entire paragraph in English.'}`;
+};
+
 /**
- * Analyze a parts quote using Claude Opus with optional extended thinking.
+ * Analyze a parts quote using Claude first, with the Worker's scoped fallback.
  */
 export const analyzeQuoteData = async (items: QuoteItem[], useThinking: boolean = false, language: 'en' | 'ar' = 'en'): Promise<string> => {
   return breaker.execute(async () => {
-    const context = items.map((i, idx) => `Line ${(idx + 1).toString().padStart(2, '0')}: ${i.qty}x ${i.partNo} (${i.desc})`).join("\n");
-
-    const prompt = `You are a senior heavy machinery logistics engineer at American Iron.
-Analyze this machinery parts list:
-${context}
-
-TASK:
-1. Identify the primary machine system being repaired.
-2. Identify any CRITICAL MISSING COMPONENTS.
-3. Provide 1 proactive maintenance recommendation.
-
-OUTPUT: Provide a cohesive, authoritative 2-3 sentence engineering brief.
-${language === 'ar' ? 'IMPORTANT: Provide the entire analysis in ARABIC language.' : 'Provide the analysis in English.'}`;
+    const prompt = buildQuoteAnalysisPrompt(items, language);
 
     const params: any = {
       action: 'text',
-      max_tokens: useThinking ? THINKING_MAX_TOKENS : 1024,
+      max_tokens: useThinking ? THINKING_MAX_TOKENS : STANDARD_MAX_TOKENS,
       messages: [{ role: 'user', content: prompt }],
     };
 
@@ -232,32 +268,50 @@ ${language === 'ar' ? 'IMPORTANT: Provide the entire analysis in ARABIC language
 };
 
 /**
- * Generate speech audio using Cloudflare Workers AI.
- * Supports English and Arabic via multilingual model.
+ * Generate speech audio using server-selected neural voice providers.
  */
-export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): Promise<string | null> => {
-  return breaker.execute(async () => {
-    let textToSpeak = text;
+export interface VoiceSynthesisResult {
+  audioBase64: string;
+  mimeType: string;
+  speechText: string;
+}
 
-    // Translate to Arabic first if needed
-    if (language === 'ar' && text && !containsArabic(text)) {
-      const translationPrompt = `Translate the following quote-analysis brief to Arabic. Preserve heavy-equipment technical terms and return only the Arabic text.\n\nText:\n${text}`;
-      const translatedResponse = await callClaude({
-        action: 'text',
-        max_tokens: STANDARD_MAX_TOKENS,
-        temperature: 0.1,
-        messages: [{ role: 'user', content: translationPrompt }],
-      });
-      const translated = translatedResponse.text || text;
+export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): Promise<VoiceSynthesisResult> => {
+  const sourceText = text.trim();
+  if (!sourceText) throw new Error('Generate an AI analysis before requesting voice output.');
 
-      if (translated && translated !== text) {
-        textToSpeak = translated;
-      }
-    }
+  let textToSpeak = sourceText;
+  const needsTranslation = language === 'ar' ? !containsArabic(sourceText) : containsArabic(sourceText);
+  if (needsTranslation) {
+    const target = language === 'ar' ? 'Arabic' : 'English';
+    const translatedResponse = await callClaude({
+      action: 'text',
+      max_tokens: STANDARD_MAX_TOKENS,
+      temperature: 0.1,
+      messages: [{
+        role: 'user',
+        content: `Translate the following quote-analysis brief to ${target}. Preserve heavy-equipment technical meaning and return only the translated brief. Do not add part lists, headings, or commentary.\n\nText:\n${sourceText}`,
+      }],
+    });
+    textToSpeak = String(translatedResponse.text || '').trim();
+    if (!textToSpeak) throw new Error(`The ${target} voice translation returned no text.`);
+  }
 
-    const resp = await callVoiceSynthesis(textToSpeak);
-    return resp.audioBase64 || null;
-  }, () => null);
+  if (language === 'ar' && !containsArabic(textToSpeak)) {
+    throw new Error('Arabic voice analysis requires a verified Arabic translation.');
+  }
+  if (language === 'en' && containsArabic(textToSpeak)) {
+    throw new Error('English voice analysis requires a verified English translation.');
+  }
+
+  const resp = await callVoiceSynthesis(textToSpeak, language);
+  const audioBase64 = typeof resp.audioBase64 === 'string' ? resp.audioBase64.trim() : '';
+  if (!audioBase64) throw new Error('Voice synthesis returned no audio.');
+  return {
+    audioBase64,
+    mimeType: typeof resp.mimeType === 'string' ? resp.mimeType : 'audio/wav',
+    speechText: textToSpeak,
+  };
 };
 
 /**

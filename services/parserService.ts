@@ -5,32 +5,44 @@ import { readSpreadsheetRows } from './spreadsheetService.ts';
 
 // --- Helper Functions ---
 
-/**
- * Aggressive cleaning to ensure only American Iron LLC and CAT engineering data remains.
- * Removes third-party vendor names, web addresses, and generic boilerplate.
- */
+const deliveryMetadataPattern = /(?:\b\d{1,3}\s+)?(?:Atlanta|Waco(?:,\s*TX)?|St\.?\s*Augustine|Brooksville|Palm\s+Bay|Perry)(?:\s+(?:Atlanta|Waco(?:,\s*TX)?|St\.?\s*Augustine|Brooksville|Palm\s+Bay|Perry))*\s*\(\s*\d+\s*(?:-\s*\d*)?\s*(?:(?:business\s*)?days?)?\s*\)(?:\s*\(\s*\d+\s*(?:-\s*\d*)?\s*(?:business\s*)?days?\s*\))?/gi;
+
+function normalizePdfText(text: string): string {
+  return String(text || '')
+    .replace(/[\u2212\u2013\u2014]/g, '-')
+    .replace(/\bS\s*T\s*A\s*T\s*U\s*S\s*:?/gi, 'STATUS:')
+    .replace(/\bL\s*I\s*N\s*E\b/gi, 'LINE')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Keep engineering text while removing document metadata that leaked into a row. */
 function cleanDescription(text: string): string {
   if (!text) return "";
 
-  let cleaned = String(text)
-    .replace(/\/\/parts\.cat\.com\/[^\s]*/gi, '')
-    .replace(/https?:\/\/[^\s]+/gi, '')
-    // Aggressive vendor removal - covering all known suppliers
-    .replace(/Ring Power|RING POWER CORPORATION|Industrial Parts Depot|IPD|COSTEX|CAT|CTP|Costex Tractor Parts|Trak-Tek|Heavy Equipment|Replacement Parts|Genuine Parts|Aftermarket|Kelly Tractor|Pantropic|Thompson Tractor/gi, "")
-    // Metadata/Location removal
-    .replace(/Tampa|Riverview|Fern Hill|ADAM qadah|americanyellowiron\.com|cat\.com|Authorized Dealer|Sales Representative/gi, "")
-    .replace(/10421 Fern Hill Dr\.|813-671-3700|33578|United States|Florida|Orlando|Jacksonville|Fort Myers/gi, "")
-    .replace(/Page \d+ of \d+/gi, "")
-    // Field label removal
-    .replace(/\b(Unit Price|Extended Price|Total Price|Product Description|Availability|Notes|Quantity|Part Number|Description|Item|Warehouse|Loc|Ship|Ref|Code|Status|Wgt|Weight|Lbs|Kgs)\b/gi, "")
-    .replace(/ORDER SUBTOTAL|ORDER TOTAL|SUBTOTAL|TAX|TOTAL DUE|SUMMARY OF CHARGES|GRAND TOTAL/gi, "")
-    .replace(/\(USD\)/g, "")
-    .replace(/[\|:]/g, " ")
+  let cleaned = normalizePdfText(text)
+    .replace(/\/\/parts\.cat\.com\/[^\s]*/gi, ' ')
+    .replace(/https?:\/\/[^\s]*/gi, ' ')
+    .replace(/\bhttps?\b|\blangid\s*=\s*[^\s]+|\b(?:SingleShipmentOrderSummaryView|storeId|catalogId)\S*/gi, ' ')
+    .replace(deliveryMetadataPattern, ' ')
+    .replace(/^MM(?:\s+\d+){1,3}\s*/i, ' ')
+    .replace(/^MM\s+GAGE\s*/i, ' ')
+    .replace(/\bLINE\s+NOTE\b/gi, ' ')
+    .replace(/\b(?:All\s+\d+\s+by\s+\w+\s+\d{1,2}|\d+\s+in\s+stock|in\s+stock|\d+\s+days?|contact\s+dealer|ship\s+\d{1,2}\/\d{2,4})\b/gi, ' ')
+    .replace(/\b(?:Ring Power|RING POWER CORPORATION|Industrial Parts Depot|IPD|COSTEX|CTP|Costex Tractor Parts|Trak-Tek|Kelly Tractor|Pantropic|Thompson Tractor|Authorized Dealer|Sales Representative)\b/gi, ' ')
+    .replace(/\b(?:Tampa|Riverview|Fern Hill|ADAM qadah|americanyellowiron\.com|cat\.com)\b/gi, ' ')
+    .replace(/\b(?:10421 Fern Hill Dr\.?|813-671-3700|33578|United States|Florida|Orlando|Jacksonville|Fort Myers)\b/gi, ' ')
+    .replace(/\bPage\s+\d+\s+of\s+\d+\b/gi, ' ')
+    .replace(/\b(?:Unit Price|Extended Price|Total Price|Product Description|Availability|Notes|Quantity|Part Number|Warehouse|Loc|Ship|Ref|Code|Wgt|Weight|Lbs|Kgs)\b/gi, ' ')
+    .replace(/\b(?:ORDER SUBTOTAL|ORDER TOTAL|SUBTOTAL|TAX|TOTAL DUE|SUMMARY OF CHARGES|GRAND TOTAL)\b/gi, ' ')
+    .replace(/\(USD\)/gi, ' ')
+    .replace(/[\|:]/g, ' ')
+    .replace(/^(?:\d{1,3}\)\s*)+/, '')
+    .replace(/^(?:\d{1,3}\.\s+)+/, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
 
-  // Remove leading line indices like "1) ", "31. "
-  cleaned = cleaned.replace(/^(?:\d+[\s)\.]*)+/, "");
-  return cleaned.replace(/\s{2,}/g, " ").trim();
+  return cleaned;
 }
 
 /**
@@ -38,11 +50,13 @@ function cleanDescription(text: string): string {
  */
 function cleanLineOfSummaryJunk(text: string): string {
   if (!text) return "";
-  return text
-    // Remove specific summary keywords and everything after them on the line
-    .replace(/(SHIPPING\/MISCELLANEOUS|ORDER SUBTOTAL|ORDER TOTAL|HTTPS\?|LANGID=|STATUS:).*/i, '')
+  return normalizePdfText(text)
+    // Remove specific summary keywords and everything after them on the line.
+    .replace(/(?:SHIPPING\/MISCELLANEOUS|ORDER SUBTOTAL|ORDER TOTAL|HTTPS\?|LANGID=|STATUS:).*/i, '')
+    .replace(deliveryMetadataPattern, ' ')
     // Also attempt to remove stray prices that might have been merged into the description
     .replace(/\s+\$\s?[\d,]+\.\d{2}\s*/, ' ')
+    .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
@@ -58,7 +72,8 @@ function extractAvailability(text: string): { availability: string, remainingTex
     /\b\d+\s+Days\b/i,
     /\d+\s+Contact\s+Dealer/i,
     /Contact\s+Dealer/i,
-    /Ship\s+\d{1,2}\/\d{2,4}/i
+    /Ship\s+\d{1,2}\/\d{2,4}/i,
+    /STATUS\s*:\s*\d+\s*(?:DAYS?|IN\s+STOCK)/i
   ];
 
   let availability = "";
@@ -107,7 +122,7 @@ function isDateString(str: string): boolean {
  * It modifies the item object directly.
  */
 function processItemLine(item: QuoteItem, lineText: string): void {
-  let text = lineText.trim();
+  let text = normalizePdfText(lineText);
   if (!text) return;
 
   // 1. Extract Unit Price (more specific, so check first)
@@ -198,10 +213,10 @@ function parseRingPowerPage(textLines: {y: number, text: string}[], isContinuati
   let inNote = false;
 
   for (const lineObj of relevantLines) {
-    const text = lineObj.text;
+    const text = normalizePdfText(lineObj.text);
     
     // Check if we hit a summary or new section that indicates end of items
-    if (/ORDER SUBTOTAL|SUMMARY OF CHARGES|PROMOTIONS & OFFERS|BILLING METHOD/i.test(text)) {
+    if (/^(?:ORDER SUBTOTAL|ORDER TOTAL|SUMMARY OF CHARGES|PROMOTIONS(?:\s*&\s*OFFERS)?|BILLING METHOD|ORDER SUMMARY|PAYMENT METHOD|TERMS\b|SHIPPING\/MISCELLANEOUS)/i.test(text)) {
         break;
     }
 
@@ -736,6 +751,9 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
 export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], clientInfo: Partial<ClientInfo>}> => {
   if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('PDF files must be between 1 byte and 10 MB.');
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  // The Suite proxy rewrites this emitted /assets URL into /hub-proxy/assets.
+  // Keeping the client value untouched prevents a second proxy prefix after
+  // Vite folds this imported URL into the production bundle.
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
@@ -829,6 +847,37 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
     // --- Image Extraction Logic ---
     const images: { y: number, x: number, dataUrl: string, width: number, height: number }[] = [];
     
+    const resolvePageImage = (imageKey: string): Promise<any | null> => new Promise((resolve) => {
+        let settled = false;
+        const finish = (value: any) => {
+            if (settled) return;
+            settled = true;
+            resolve(value || null);
+        };
+        const timer = window.setTimeout(() => finish(null), 3_000);
+        try {
+            const callbackResult = page.objs.get(imageKey, (value: any) => {
+                window.clearTimeout(timer);
+                finish(value);
+            });
+            if (callbackResult && typeof callbackResult.then === 'function') {
+                callbackResult.then((value: any) => {
+                    window.clearTimeout(timer);
+                    finish(value);
+                }).catch(() => {
+                    window.clearTimeout(timer);
+                    finish(null);
+                });
+            } else if (callbackResult && typeof callbackResult === 'object') {
+                window.clearTimeout(timer);
+                finish(callbackResult);
+            }
+        } catch {
+            window.clearTimeout(timer);
+            finish(null);
+        }
+    });
+
     const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
         const transformStack: any[] = [];
         let currentTransform = [...initialTransform];
@@ -853,14 +902,7 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
                     let imgData: any = null;
                     if (fn === pdfjs.OPS.paintImageXObject) {
                         const imgKey = args[0];
-                        try {
-                            imgData = page.objs.get(imgKey);
-                            if (imgData instanceof Promise) {
-                                imgData = await imgData;
-                            }
-                        } catch {
-                            imgData = null;
-                        }
+                        imgData = await resolvePageImage(imgKey);
                     } else {
                         imgData = args[0];
                     }
@@ -915,11 +957,20 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
         }
     };
 
+    let imageExtractionTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-        const operatorList = await page.getOperatorList();
-        await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
+        const imageExtraction = (async () => {
+          const operatorList = await page.getOperatorList();
+          await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
+        })();
+        const timeout = new Promise<never>((_, reject) => {
+          imageExtractionTimeout = setTimeout(() => reject(new Error('PDF image extraction timed out.')), 20_000);
+        });
+        await Promise.race([imageExtraction, timeout]);
     } catch {
         // PDF image extraction is best-effort and must not block quote extraction.
+    } finally {
+        if (imageExtractionTimeout) clearTimeout(imageExtractionTimeout);
     }
 
     // Associate extracted images with items on this page
@@ -932,8 +983,8 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
       
       availableImages.forEach((img, i) => {
         const diff = Math.abs(img.y - itemY);
-        // Increased threshold to 300 for better tolerance on complex layouts
-        if (diff < minDiff && diff < 300) { 
+        // Keep logos/footer images away from parts by requiring a nearby row.
+        if (diff < minDiff && diff < 300) {
           minDiff = diff; 
           bestImgIdx = i; 
         }

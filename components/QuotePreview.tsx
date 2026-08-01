@@ -25,9 +25,9 @@ const formatCurrency = (amount: number) => {
 };
 
 // ElevenLabs TTS audio is returned as base64 MP3 by the service layer.
-const toMp3DataUrl = (base64Audio: string): string => {
+const toWavDataUrl = (base64Audio: string): string => {
   if (base64Audio.startsWith('data:')) return base64Audio;
-  return `data:audio/mpeg;base64,${base64Audio}`;
+  return `data:audio/wav;base64,${base64Audio}`;
 };
 
 const translations = {
@@ -170,7 +170,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
 
   useEffect(() => {
     if (audioData) {
-      setAudioDataUrl(toMp3DataUrl(audioData));
+      setAudioDataUrl(toWavDataUrl(audioData));
     } else {
       setAudioDataUrl(null);
     }
@@ -511,7 +511,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
                     <div className={`mt-6 pt-5 border-t border-slate-200/80 print:mt-2 print:pt-2 print:border-slate-300 flex ${isRtl ? 'justify-end' : 'justify-start'}`}>
                       <a 
                         href={audioDataUrl} 
-                        download={`AI-Briefing-${config.quoteId}.mp3`}
+                        download={`AI-Briefing-${config.quoteId}.wav`}
                         className="inline-flex items-center gap-3 px-6 py-3 bg-cat-black text-cat-yellow rounded-xl text-[10px] font-black uppercase tracking-[0.2em] no-underline shadow-lg hover:bg-cat-dark hover:-translate-y-0.5 transition-all duration-300"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V3"></path></svg>

@@ -6,6 +6,7 @@ import { performIntelligentTask, transcribeAudio } from '../services/claudeServi
 import { Logo } from './Logo.tsx';
 import { COUNTRY_OPTIONS, normalizeCountryCode } from '../services/countryOptions.ts';
 import { Languages, Mic, Square } from 'lucide-react';
+import { publishQuoteImport } from '../services/quoteImportBridge.ts';
 
 // --- High-Fidelity UI Components ---
 
@@ -100,7 +101,6 @@ const Switch: React.FC<{ enabled: boolean; onChange: (enabled: boolean) => void;
 
 interface ConfigPanelProps {
   itemsCount: number;
-  onDataLoaded: (items: QuoteItem[]) => void;
   onConfigChange: (config: AppConfig) => void;
   onClientChange: (info: ClientInfo) => void;
   onAnalyze: (thinking?: boolean) => void;
@@ -152,6 +152,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [textInput, setTextInput] = useState("");
   const [status, setStatus] = useState("Idle");
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
   const [showAddressBook, setShowAddressBook] = useState(false);
   const [bookSearch, setBookSearch] = useState("");
   const [useThinking, setUseThinking] = useState(false);
@@ -307,30 +308,44 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const handleProcess = async (file?: File) => {
     setStatus("Processing");
     setStatusError(null);
+    setStatusSuccess(null);
     try {
+        let items: QuoteItem[] = [];
         if (activeTab === ParseMode.PASTE) {
-            const items = parseTextData(textInput);
-            if (items.length > 0) props.onDataLoaded(items);
+            if (!textInput.trim()) throw new Error('Paste quote line items before processing the manifest.');
+            items = parseTextData(textInput);
         } else if (activeTab === ParseMode.PDF) {
             const pdfFile = file || pdfInputRef.current?.files?.[0];
-            if (pdfFile) {
-                const { items } = await parsePdfFile(pdfFile);
-                if (items.length > 0) props.onDataLoaded(items);
-            }
+            if (!pdfFile) throw new Error('Choose a Caterpillar or supplier PDF before processing the manifest.');
+            ({ items } = await parsePdfFile(pdfFile));
         } else if (activeTab === ParseMode.EXCEL) {
             const excelFile = file || excelInputRef.current?.files?.[0];
-            if (excelFile) {
-                const items = await parseExcelFile(excelFile);
-                if (items.length > 0) props.onDataLoaded(items);
-            }
+            if (!excelFile) throw new Error('Choose a CSV or Excel file before processing the manifest.');
+            items = await parseExcelFile(excelFile);
         }
+        if (items.length === 0) throw new Error('No line items were detected. Confirm that the source contains item quantities and part numbers, then retry.');
+        publishQuoteImport(props.currentUser, items);
+        setStatusSuccess(`${items.length} line item${items.length === 1 ? '' : 's'} imported into the quote.`);
         setStatus("Complete");
     } catch (err) {
         setStatus("Error");
         setStatusError(err instanceof Error ? err.message : 'The manifest could not be processed. Check the file and retry.');
     } finally {
-        setTimeout(() => setStatus("Idle"), 3000);
+        if (activeTab === ParseMode.PDF && pdfInputRef.current) pdfInputRef.current.value = '';
+        if (activeTab === ParseMode.EXCEL && excelInputRef.current) excelInputRef.current.value = '';
+        setTimeout(() => {
+          setStatus("Idle");
+          setStatusSuccess(null);
+        }, 5000);
     }
+  };
+
+  const openManifestFilePicker = () => {
+    if (activeTab === ParseMode.PDF) {
+      pdfInputRef.current?.click();
+      return;
+    }
+    excelInputRef.current?.click();
   };
 
   const handleIntelligentTask = async () => {
@@ -456,8 +471,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                   </div>
                 </div>
               ) : (
-                <div 
-                  onClick={() => activeTab === ParseMode.PDF ? pdfInputRef.current?.click() : excelInputRef.current?.click()} 
+                <>
+                <button
+                  type="button"
+                  onClick={openManifestFilePicker}
                   className="w-full h-40 bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center gap-3 cursor-pointer hover:bg-white hover:border-cat-yellow transition-all group"
                 >
                   <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-slate-300 group-hover:text-cat-black shadow-sm transition-colors">
@@ -467,9 +484,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                     <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Load {activeTab} Payload</p>
                     <p className="text-[8px] font-bold text-slate-400 uppercase mt-1">Auto-indexing enabled</p>
                   </div>
-                  <input ref={pdfInputRef} type="file" className="hidden" accept=".pdf" onChange={(e) => handleProcess(e.target.files?.[0])} />
-                  <input ref={excelInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={(e) => handleProcess(e.target.files?.[0])} />
-                </div>
+                </button>
+                <input ref={pdfInputRef} type="file" className="hidden" accept=".pdf" aria-label="Choose a PDF quote" onChange={(e) => { void handleProcess(e.target.files?.[0]); }} />
+                <input ref={excelInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv" aria-label="Choose a spreadsheet quote" onChange={(e) => { void handleProcess(e.target.files?.[0]); }} />
+                </>
               )}
             </div>
 
@@ -498,6 +516,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
             {statusError && (
               <p role="alert" className="mt-3 text-[10px] font-bold leading-relaxed text-red-600">
                 {statusError}
+              </p>
+            )}
+            {statusSuccess && (
+              <p role="status" className="mt-3 text-[10px] font-bold leading-relaxed text-emerald-700">
+                {statusSuccess}
               </p>
             )}
           </div>

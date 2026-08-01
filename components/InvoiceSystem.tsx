@@ -5,7 +5,8 @@ import { Logo } from './Logo.tsx';
 import { PartImage } from './PartImage.tsx';
 import { exportInvoices } from '../services/exportService.ts';
 import { hubApiFetch } from '../services/hubApi.ts';
-import { Copy, Download, FileSpreadsheet, FileText, Link2 } from 'lucide-react';
+import { invoiceWhatsAppMessage, whatsAppSendUrl } from '../services/whatsAppService.ts';
+import { Copy, Download, FileSpreadsheet, FileText, Link2, MessageCircle } from 'lucide-react';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -264,6 +265,20 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
 
   const handleOpenInvoiceEmail = () => {
     void handleSendInvoiceEmail();
+  };
+
+  const handleShareInvoiceWhatsApp = () => {
+    if (!selectedClient) {
+      setPaymentLinkError('Select a customer before sharing this invoice.');
+      return;
+    }
+    const phone = selectedClient.whatsapp || selectedClient.phone || '';
+    if (!phone) {
+      setPaymentLinkError('Add a WhatsApp or phone number to this customer before sharing the invoice.');
+      return;
+    }
+    const message = invoiceWhatsAppMessage(currentInvoice, selectedClient.company || selectedClient.contactName || 'N/A', currentPaymentLink);
+    window.open(whatsAppSendUrl(phone, message), '_blank', 'noopener,noreferrer');
   };
 
   const copyPaymentLink = async () => {
@@ -637,6 +652,9 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
               )}
               <button type="button" onClick={handleOpenInvoiceEmail} disabled={isPreparingPaymentLink} className="px-6 py-4 bg-emerald-600 text-white rounded-xl font-black uppercase text-[8px] tracking-[0.2em] shadow-lg shadow-emerald-600/10 btn-app hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
                 Send Invoice
+              </button>
+              <button type="button" onClick={handleShareInvoiceWhatsApp} disabled={!selectedClient} className="px-5 py-4 bg-[#25D366] text-white rounded-xl font-black uppercase text-[8px] tracking-[0.16em] shadow-sm btn-app hover:bg-[#1fb855] disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-2">
+                <MessageCircle className="w-3.5 h-3.5" /> WhatsApp
               </button>
               <button type="button" onClick={() => {
                 try {

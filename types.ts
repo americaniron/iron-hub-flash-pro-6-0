@@ -11,6 +11,7 @@ export interface InventoryPart {
 
 export interface User {
   username: string;
+  workspaceId: string;
   role: string;
   displayName: string;
   credits?: number;

@@ -42,8 +42,12 @@ function isHubApiPath(pathname) {
   return HUB_API_ENDPOINTS.has(pathname.slice("/api/".length));
 }
 
-function standaloneCanonicalRedirect(url) {
+function standaloneCanonicalRedirect(request, url) {
   if (url.hostname !== PAGES_HOST) return null;
+  // IronSuite fetches the production Pages build server-side and serves it
+  // through its same-origin authenticated iframe. Do not redirect that
+  // internal fetch through the public custom-domain security layer.
+  if (request.headers.get("X-Iron-Suite-Embed") === "1") return null;
   const target = new URL(url.pathname + url.search, STANDALONE_HUB_ORIGIN);
   return Response.redirect(target.toString(), 308);
 }
@@ -130,7 +134,7 @@ async function proxyStandaloneHubApi(context, url) {
 
 export async function onRequest(context) {
   const url = new URL(context.request.url);
-  const canonicalRedirect = standaloneCanonicalRedirect(url);
+  const canonicalRedirect = standaloneCanonicalRedirect(context.request, url);
   if (canonicalRedirect) return canonicalRedirect;
 
   // Browser requests carry only the standalone HttpOnly session cookie. The

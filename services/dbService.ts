@@ -246,8 +246,9 @@ async function getData<T>(storeName: string, username: string, defaultVal: T): P
   if (isUp) {
     const serverData = await serverGet<T>(username, storeName);
     if (serverData !== null) {
-      // If server returned empty/default, check if local has real data first
-      if (isEmptyDefault(storeName, serverData)) {
+      // Canonical Suite stores are authoritative. An empty server collection
+      // is a valid state and must not be replaced by an old browser cache.
+      if (!CANONICAL_STORES.has(storeName) && isEmptyDefault(storeName, serverData)) {
         const localData = await localGet<T>(storeName, username);
         if (localData !== null && !isEmptyDefault(storeName, localData)) {
           // Local has real data that server doesn't — use local and push to server
@@ -309,6 +310,10 @@ async function migrateLocalToServer(username: string): Promise<void> {
     const serverData = await serverGetAll(username);
 
     for (const store of STORE_NAMES) {
+      // Canonical Suite stores are server-owned. Pending writes are flushed
+      // separately; never resurrect an old browser copy into a live tenant
+      // just because the authoritative collection is currently empty.
+      if (CANONICAL_STORES.has(store)) continue;
       const sData = serverData ? serverData[store] : null;
       const serverHasData = sData !== null && !isEmptyDefault(store, sData);
 
@@ -338,9 +343,8 @@ export const dbService = {
   async initialize(username: string): Promise<{ serverConnected: boolean }> {
     const isUp = await checkServerAvailability();
     if (isUp) {
-      void flushPendingCanonicalWrites(username);
-      // Kick off migration in background
-      void migrateLocalToServer(username);
+      await flushPendingCanonicalWrites(username);
+      await migrateLocalToServer(username);
     }
     return { serverConnected: isUp };
   },

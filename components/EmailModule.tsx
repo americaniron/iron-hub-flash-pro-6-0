@@ -2,6 +2,61 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ClientInfo, AppConfig, QuoteItem, EmailDraft, InvoiceData } from '../types.ts';
 import { generateEmailDraft } from '../services/claudeService.ts';
 import { hubApiFetch } from '../services/hubApi.ts';
+import { Paperclip } from 'lucide-react';
+
+type StagedAttachment = {
+  filename: string;
+  path: string;
+  size: string;
+  bytes: number;
+};
+
+const MAX_EMAIL_ATTACHMENTS = 5;
+const MAX_EMAIL_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+const MAX_EMAIL_ATTACHMENTS_BYTES = 24 * 1024 * 1024;
+const LOCAL_ATTACHMENT_TYPES: Record<string, string> = {
+  '.csv': 'text/csv',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.txt': 'text/plain',
+  '.webp': 'image/webp',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+const attachmentBytesFromDataUrl = (dataUrl: string): number => {
+  const content = dataUrl.slice(dataUrl.indexOf(',') + 1).replace(/\s/g, '');
+  const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor(content.length * 3 / 4) - padding);
+};
+
+const attachmentSizeLabel = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+
+const localAttachmentMime = (file: File): string | null => {
+  const extension = file.name.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] || '';
+  return LOCAL_ATTACHMENT_TYPES[extension] || null;
+};
+
+const localAttachmentDataUrl = (file: File, mimeType: string): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : '';
+    const separator = result.indexOf(',');
+    if (separator < 0) {
+      reject(new Error(`Could not encode ${file.name}.`));
+      return;
+    }
+    resolve(`data:${mimeType};base64,${result.slice(separator + 1)}`);
+  };
+  reader.readAsDataURL(file);
+});
 
 type EmailDispatchResult = {
   success?: boolean;
@@ -29,10 +84,11 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isAttaching, setIsAttaching] = useState<string | null>(null);
-  const [stagedAttachments, setStagedAttachments] = useState<{filename: string, path: string, size: string}[]>([]);
+  const [stagedAttachments, setStagedAttachments] = useState<StagedAttachment[]>([]);
   const [sendStatus, setSendStatus] = useState<string[]>([]);
   const [tone, setTone] = useState('professional');
   const consoleRef = useRef<HTMLDivElement>(null);
+  const localAttachmentInputRef = useRef<HTMLInputElement>(null);
   const autoAttachedDocumentRef = useRef<string | null>(null);
   const dispatchAttemptRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
   const documentFilename = invoice?.id ? `${invoice.id}.pdf` : (config?.quoteId ? `${config.quoteId}.pdf` : 'Document.pdf');
@@ -63,10 +119,11 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
   };
 
   useEffect(() => {
-    if (isOpen && client.email) {
-      handleGenerate();
-    }
-    }, [isOpen, client.email, invoice]);
+    if (!isOpen) return;
+    dispatchAttemptRef.current = null;
+    setDraft((previous) => ({ ...previous, to: client.email.trim() }));
+    if (client.email.trim()) void handleGenerate();
+  }, [isOpen, client.email, invoice]);
 
   useEffect(() => {
     if (consoleRef.current) {
@@ -78,7 +135,7 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     setIsGenerating(true);
     try {
       const result = await generateEmailDraft(client, config, items, tone, invoice, config?.documentLanguage || 'en');
-      setDraft(result);
+      setDraft({ ...result, to: client.email.trim() || result.to.trim() });
     } catch {
       setSendStatus((previous) => [...previous, '[EMAIL] Draft generation failed. You can still compose and send the message manually.']);
     } finally {
@@ -104,13 +161,19 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
         setSendStatus((previous) => [...previous, '[PDF] Document generation failed. Try attaching the PDF again before sending.']);
         return;
       }
-      const sizeInMB = (base64.length * 0.75) / (1024 * 1024);
+      const bytes = attachmentBytesFromDataUrl(base64);
+      const existingBytes = stagedAttachments.reduce((sum, attachment) => sum + attachment.bytes, 0);
+      if (bytes <= 0 || bytes > MAX_EMAIL_ATTACHMENT_BYTES || existingBytes + bytes > MAX_EMAIL_ATTACHMENTS_BYTES) {
+        setSendStatus((previous) => [...previous, '[PDF] The generated document exceeds the secure 12 MB per-file or 24 MB message limit. Remove high-resolution images and generate it again.']);
+        return;
+      }
 
       if (!stagedAttachments.some(a => a.filename === documentFilename)) {
         setStagedAttachments(prev => [...prev, {
           filename: documentFilename,
           path: base64,
-          size: `${sizeInMB.toFixed(2)} MB`
+          size: attachmentSizeLabel(bytes),
+          bytes,
         }]);
       }
     } catch {
@@ -138,21 +201,74 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     try {
       const base64Audio = await getAudioAttachment();
       if (base64Audio) {
-        // Calculate size from base64 string (approximate)
-        const sizeInMB = (base64Audio.length * 0.75) / (1024 * 1024);
-        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.mp3`;
+        const bytes = attachmentBytesFromDataUrl(base64Audio);
+        const filename = `Voice_Analysis_${config?.ttsLanguage?.toUpperCase() || 'EN'}.wav`;
 
         if (!stagedAttachments.some(a => a.filename === filename)) {
           setStagedAttachments(prev => [...prev, {
             filename,
             path: base64Audio,
-            size: `${sizeInMB.toFixed(2)} MB`
+            size: attachmentSizeLabel(bytes),
+            bytes,
           }]);
         }
       }
     } catch {
       setSendStatus((previous) => [...previous, '[AUDIO] Voice analysis could not be attached. Generate the voice analysis again and retry.']);
     } finally {
+      setIsAttaching(null);
+    }
+  };
+
+  const handleAttachLocalFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!files.length || isAttaching) return;
+
+    setIsAttaching('local');
+    const messages: string[] = [];
+    try {
+      const existingNames = new Set(stagedAttachments.map((attachment) => attachment.filename.toLowerCase()));
+      const additions: StagedAttachment[] = [];
+      let totalBytes = stagedAttachments.reduce((sum, attachment) => sum + attachment.bytes, 0);
+
+      for (const file of files) {
+        if (stagedAttachments.length + additions.length >= MAX_EMAIL_ATTACHMENTS) {
+          messages.push(`[ATTACHMENT] A maximum of ${MAX_EMAIL_ATTACHMENTS} files can be sent in one message.`);
+          break;
+        }
+        if (!file.size || file.size > MAX_EMAIL_ATTACHMENT_BYTES) {
+          messages.push(`[ATTACHMENT] ${file.name} must be larger than 0 bytes and no more than 12 MB.`);
+          continue;
+        }
+        if (totalBytes + file.size > MAX_EMAIL_ATTACHMENTS_BYTES) {
+          messages.push('[ATTACHMENT] The combined attachment limit is 24 MB. Remove a file before adding another.');
+          break;
+        }
+        const mimeType = localAttachmentMime(file);
+        if (!mimeType) {
+          messages.push(`[ATTACHMENT] ${file.name} is not a supported document, spreadsheet, image, PDF, text, or MP3 file.`);
+          continue;
+        }
+        if (existingNames.has(file.name.toLowerCase())) {
+          messages.push(`[ATTACHMENT] ${file.name} is already attached.`);
+          continue;
+        }
+
+        const path = await localAttachmentDataUrl(file, mimeType);
+        additions.push({ filename: file.name, path, size: attachmentSizeLabel(file.size), bytes: file.size });
+        existingNames.add(file.name.toLowerCase());
+        totalBytes += file.size;
+      }
+
+      if (additions.length) {
+        setStagedAttachments((previous) => [...previous, ...additions]);
+        messages.push(`[ATTACHMENT] Added ${additions.length} local file${additions.length === 1 ? '' : 's'}.`);
+      }
+    } catch (error) {
+      messages.push(`[ATTACHMENT] ${error instanceof Error ? error.message : 'The selected files could not be attached.'}`);
+    } finally {
+      if (messages.length) setSendStatus((previous) => [...previous, ...messages]);
       setIsAttaching(null);
     }
   };
@@ -213,10 +329,29 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
     addLog("Initializing IronSuite secure email delivery...");
     addLog("Target: " + draft.to);
     
-    addLog(`Payload: ${stagedAttachments.length} Staged Attachments`);
-    stagedAttachments.forEach(a => addLog(`- ${a.filename} (${a.size})`));
-    
     try {
+      let attachmentsForSend = stagedAttachments;
+      if (generatePdf && !attachmentsForSend.some((attachment) => attachment.filename === documentFilename)) {
+        addLog('Generating the quote or invoice PDF before dispatch...');
+        const document = await generatePdf();
+        if (!document) throw new Error('The quote or invoice PDF could not be generated.');
+        const bytes = attachmentBytesFromDataUrl(document);
+        const currentBytes = attachmentsForSend.reduce((sum, attachment) => sum + attachment.bytes, 0);
+        if (bytes <= 0 || bytes > MAX_EMAIL_ATTACHMENT_BYTES || currentBytes + bytes > MAX_EMAIL_ATTACHMENTS_BYTES) {
+          throw new Error('The generated PDF exceeds the secure attachment size limit.');
+        }
+        const generatedAttachment = {
+          filename: documentFilename,
+          path: document,
+          size: attachmentSizeLabel(bytes),
+          bytes,
+        };
+        attachmentsForSend = [...attachmentsForSend, generatedAttachment];
+        setStagedAttachments(attachmentsForSend);
+      }
+
+      addLog(`Payload: ${attachmentsForSend.length} Staged Attachments`);
+      attachmentsForSend.forEach(a => addLog(`- ${a.filename} (${a.size})`));
       addLog("Connecting to delivery service...");
       const invoicePaymentMessage = invoice && paymentUrl && !draft.body.includes(paymentUrl)
         ? `${draft.body}\n\nSecure payment: ${paymentUrl}`
@@ -224,12 +359,12 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
       const payload = {
         ...draft,
         body: invoicePaymentMessage,
-        attachments: stagedAttachments.map(a => ({ filename: a.filename, path: a.path })),
+        attachments: attachmentsForSend.map(a => ({ filename: a.filename, path: a.path })),
         idempotencyKey: deliveryAttemptId(JSON.stringify([
           draft.to,
           draft.subject,
           invoicePaymentMessage,
-          stagedAttachments.map(({ filename, path }) => [filename, path.length, path.slice(0, 32)])
+          attachmentsForSend.map(({ filename, path }) => [filename, path.length, path.slice(0, 32)])
         ]))
       };
       
@@ -418,6 +553,30 @@ export const EmailModule: React.FC<EmailModuleProps> = ({ isOpen, onClose, clien
                   </div>
                 </button>
               )}
+
+              <button
+                type="button"
+                onClick={() => localAttachmentInputRef.current?.click()}
+                disabled={isAttaching !== null || stagedAttachments.length >= MAX_EMAIL_ATTACHMENTS}
+                className={`flex items-center gap-4 px-6 py-4 border-2 rounded-[1.5rem] transition-all group ${isRtl ? 'flex-row-reverse' : ''} ${isAttaching === 'local' ? 'bg-slate-100 border-slate-200' : 'bg-white border-slate-100 hover:border-cat-yellow hover:shadow-lg active:scale-95'} disabled:cursor-not-allowed disabled:opacity-60`}
+              >
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-cat-yellow/10 text-cat-black group-hover:bg-cat-yellow transition-all">
+                  <Paperclip className="w-5 h-5" />
+                </div>
+                <div className={isRtl ? 'text-right' : 'text-left'}>
+                  <p className="text-[12px] font-black uppercase tracking-widest text-cat-black">{isRtl ? 'إضافة ملفات' : 'Add Files'}</p>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{isRtl ? 'من الجهاز المحلي' : 'From Local Drive'}</p>
+                </div>
+              </button>
+              <input
+                ref={localAttachmentInputRef}
+                type="file"
+                className="hidden"
+                multiple
+                accept=".pdf,.mp3,.wav,.png,.jpg,.jpeg,.webp,.txt,.csv,.doc,.docx,.xls,.xlsx"
+                aria-label="Add local email attachments"
+                onChange={(event) => { void handleAttachLocalFiles(event); }}
+              />
             </div>
 
             {/* Staged Attachments List */}

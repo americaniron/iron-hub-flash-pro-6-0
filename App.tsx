@@ -17,7 +17,9 @@ import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContact
 import { activityBridge } from './services/activityBridge.ts';
 import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
 import { calculateQuoteFinancials } from './services/documentMath.ts';
+import { quoteWhatsAppMessage, whatsAppSendUrl } from './services/whatsAppService.ts';
 import { hubApiFetch } from './services/hubApi.ts';
+import { subscribeToQuoteImports } from './services/quoteImportBridge.ts';
 
 // Production-ready components defined within App.tsx to adhere to file constraints
 const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
@@ -38,6 +40,7 @@ function isHubSessionUser(value: unknown): value is User {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<User>;
   return typeof candidate.username === 'string' && candidate.username.length > 0
+    && typeof candidate.workspaceId === 'string' && candidate.workspaceId.length > 0
     && typeof candidate.displayName === 'string' && candidate.displayName.length > 0
     && typeof candidate.role === 'string' && candidate.role.length > 0;
 }
@@ -126,13 +129,13 @@ const isApiKeyError = (error: any): boolean => {
   );
 };
 
-// ElevenLabs returns base64-encoded MP3. Decode to a Blob so we can play it via
-// <Audio> (native MP3 decode) and attach/download it as a real .mp3 file.
-function base64ToAudioBlob(base64: string): Blob {
+// The server returns a validated RIFF/WAV payload. Preserve its actual MIME type
+// so native playback, downloads, and outbound attachments decode reliably.
+function base64ToWavBlob(base64: string): Blob {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return new Blob([bytes], { type: 'audio/mpeg' });
+  return new Blob([bytes], { type: 'audio/wav' });
 }
 
 const canonicalSyncFailureMessage = (recordType: string) =>
@@ -153,6 +156,11 @@ const App: React.FC = () => {
 
   const [items, setItems] = useState<QuoteItem[]>([]);
   const [customerAccounts, setCustomerAccounts] = useState<CustomerAccount[]>([]);
+  const customerAccountsVersionRef = useRef(0);
+  const updateCustomerAccounts = useCallback((accounts: CustomerAccount[]) => {
+    customerAccountsVersionRef.current += 1;
+    setCustomerAccounts(accounts);
+  }, []);
   const [quoteHistory, setQuoteHistory] = useState<SavedQuote[]>([]);
   const [invoices, setInvoices] = useState<InvoiceData[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -196,6 +204,14 @@ const App: React.FC = () => {
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const currentAudioUrlRef = useRef<string | null>(null);
   const prevLangRef = useRef(config.documentLanguage);
+  const appliedQuoteImportRef = useRef<string | null>(null);
+
+  useEffect(() => () => {
+    if (currentAudioRef.current) {
+      try { currentAudioRef.current.pause(); } catch {}
+    }
+    if (currentAudioUrlRef.current) URL.revokeObjectURL(currentAudioUrlRef.current);
+  }, []);
 
   useEffect(() => {
     if (config.documentLanguage !== prevLangRef.current) {
@@ -219,6 +235,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!user) return;
     const syncCloudData = async () => {
+      const accountsVersion = customerAccountsVersionRef.current;
       setSyncStatus('syncing');
       try {
         // Initialize server connection & migrate local data if needed
@@ -234,7 +251,9 @@ const App: React.FC = () => {
           dbService.getTemplates(user.username),
           dbService.getInventory(user.username)
         ]);
-        setCustomerAccounts(accounts);
+        if (customerAccountsVersionRef.current === accountsVersion) {
+          setCustomerAccounts(accounts);
+        }
         setQuoteHistory(quotes);
         setInvoices(invoicesData);
         setPayments(paymentsData);
@@ -262,7 +281,8 @@ const App: React.FC = () => {
   }, [user]);
 
   useEffect(() => {
-    if (!user || window.parent === window) return;
+    if (!user) return;
+    const isEmbedded = window.parent !== window;
     const pendingStores = new Set<'accounts' | 'quotes' | 'invoices' | 'payments' | 'inventory'>();
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let reconciliationTimer: ReturnType<typeof setInterval> | null = null;
@@ -280,7 +300,13 @@ const App: React.FC = () => {
       setSyncStatus('syncing');
       try {
         const { serverConnected } = await dbService.refreshConnection(user.username);
-        if (stores.has('accounts')) setCustomerAccounts(await dbService.getCustomerAccounts(user.username));
+        if (stores.has('accounts')) {
+          const accountsVersion = customerAccountsVersionRef.current;
+          const accounts = await dbService.getCustomerAccounts(user.username);
+          if (customerAccountsVersionRef.current === accountsVersion) {
+            setCustomerAccounts(accounts);
+          }
+        }
         if (stores.has('quotes')) setQuoteHistory(await dbService.getQuotes(user.username));
         if (stores.has('invoices')) setInvoices(await dbService.getInvoices(user.username));
         if (stores.has('payments')) setPayments(await dbService.getPayments(user.username));
@@ -321,7 +347,7 @@ const App: React.FC = () => {
       scheduleRefresh();
     };
 
-    window.addEventListener('message', handleSuiteMessage);
+    if (isEmbedded) window.addEventListener('message', handleSuiteMessage);
     // WebSocket events provide the immediate path. This bounded backstop
     // repairs a stale iframe after a transient browser/network disconnect.
     reconciliationTimer = setInterval(() => {
@@ -329,7 +355,7 @@ const App: React.FC = () => {
       scheduleRefresh();
     }, 30_000);
     return () => {
-      window.removeEventListener('message', handleSuiteMessage);
+      if (isEmbedded) window.removeEventListener('message', handleSuiteMessage);
       if (refreshTimer) clearTimeout(refreshTimer);
       if (reconciliationTimer) clearInterval(reconciliationTimer);
     };
@@ -358,17 +384,16 @@ const App: React.FC = () => {
     return `AMI-${Math.abs(hash).toString(36).toUpperCase().padStart(6, '0')}`;
   };
 
-  const handleDataLoaded = async (newItems: QuoteItem[]) => {
+  const handleDataLoaded = (newItems: QuoteItem[]) => {
     const cleanItems = newItems.map(item => ({ ...item, aiImageUrl: undefined }));
     setItems(cleanItems);
     setAiAnalysis(null);
-    setAudioData(null); // Clear previous audio
+    setAudioData(null);
     setConfig(prev => {
       const hasExtracted = newItems.some(item => item.originalImages && item.originalImages.length > 0);
-      return { 
-        ...prev, 
+      return {
+        ...prev,
         quoteId: generateDocumentId(prev.isInvoice),
-        // Automatically switch to EXTRACT mode if images were found in the PDF
         photoMode: hasExtracted ? PhotoMode.EXTRACT : prev.photoMode
       };
     });
@@ -377,7 +402,7 @@ const App: React.FC = () => {
         resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 100);
 
-    if (user) {
+    if (user) window.setTimeout(() => {
       const total = cleanItems.reduce((sum, i) => sum + (i.qty * i.unitPrice), 0);
       activityBridge.quoteCreated(
         config.quoteId || generateDocumentId(false),
@@ -397,11 +422,6 @@ const App: React.FC = () => {
           originalImages: item.originalImages || []
         };
       });
-      const inventorySync = await dbService.addOrUpdateInventoryParts(user.username, inventoryParts);
-      if (!inventorySync.synced) setSyncStatus('error');
-      activityBridge.inventoryUpdated(inventoryParts.length, user.username);
-
-      // Also save to image pool if images exist
       const imagesToPool = cleanItems
         .filter(item => item.originalImages && item.originalImages.length > 0)
         .map(item => ({
@@ -409,12 +429,24 @@ const App: React.FC = () => {
           description: item.desc,
           imageUrl: item.originalImages![0]
         }));
-      
-      if (imagesToPool.length > 0) {
-        await dbService.addImagesToPool(user.username, imagesToPool);
-      }
-    }
+
+      void (async () => {
+        const inventorySync = await dbService.addOrUpdateInventoryParts(user.username, inventoryParts);
+        if (!inventorySync.synced) setSyncStatus('error');
+        activityBridge.inventoryUpdated(inventoryParts.length, user.username);
+        if (imagesToPool.length > 0) await dbService.addImagesToPool(user.username, imagesToPool);
+      })().catch(() => setSyncStatus('error'));
+    }, 0);
   };
+
+  useEffect(() => {
+    if (!user) return;
+    return subscribeToQuoteImports(user, (record) => {
+      if (appliedQuoteImportRef.current === record.id) return;
+      appliedQuoteImportRef.current = record.id;
+      handleDataLoaded(record.items);
+    });
+  }, [user]);
 
   const handleAnalyze = async (thinking: boolean = false) => {
     if (items.length === 0 || !user) return;
@@ -509,9 +541,7 @@ const App: React.FC = () => {
     if (!aiAnalysis || isSpeaking) return;
     setIsSpeaking(true);
     try {
-      const base64Audio = await generateTTS(aiAnalysis, config.ttsLanguage);
-      if (!base64Audio) { setIsSpeaking(false); return; }
-      setAudioData(base64Audio); // Save base64 for download / email-attach
+      const generatedVoice = await generateTTS(aiAnalysis, config.ttsLanguage);
       // Stop any in-flight audio + revoke its URL before starting new playback
       if (currentAudioRef.current) {
         try { currentAudioRef.current.pause(); } catch {}
@@ -521,9 +551,9 @@ const App: React.FC = () => {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
       }
-      // Decode base64 → MP3 bytes → Blob → Object URL → native <audio> element.
-      // The browser's <audio> handles MP3 natively; no Web Audio / PCM math.
-      const url = URL.createObjectURL(base64ToAudioBlob(base64Audio));
+      const base64Audio = generatedVoice.audioBase64;
+      setAudioData(base64Audio); // Save base64 for download / email-attach
+      const url = URL.createObjectURL(base64ToWavBlob(base64Audio));
       const audio = new Audio(url);
       currentAudioRef.current = audio;
       currentAudioUrlRef.current = url;
@@ -540,11 +570,52 @@ const App: React.FC = () => {
         alert('Voice playback failed. Generate the voice analysis again and retry.');
         cleanup();
       };
-      await audio.play();
+      try {
+        let playbackTimer: number | undefined;
+        try {
+          await Promise.race([
+            audio.play(),
+            new Promise<never>((_, reject) => {
+              playbackTimer = window.setTimeout(
+                () => reject(new Error('Voice playback did not start before browser activation expired.')),
+                2500,
+              );
+            }),
+          ]);
+        } finally {
+          if (playbackTimer !== undefined) window.clearTimeout(playbackTimer);
+        }
+      } catch {
+        // The generated audio remains available in the visible native player.
+        // Some browsers expire click activation while the network request runs.
+        try { audio.pause(); } catch {}
+        if (currentAudioUrlRef.current === url) {
+          URL.revokeObjectURL(url);
+          currentAudioUrlRef.current = null;
+          currentAudioRef.current = null;
+        }
+        setIsSpeaking(false);
+      }
     } catch (e) {
-      if (!handleApiError(e)) alert('Voice analysis is temporarily unavailable. Please try again.');
+      if (!handleApiError(e)) {
+        alert(e instanceof Error ? e.message : 'Voice analysis is temporarily unavailable. Please try again.');
+      }
       setIsSpeaking(false);
     }
+  };
+
+  const selectTtsLanguage = (language: 'en' | 'ar') => {
+    if (currentAudioRef.current) {
+      try { currentAudioRef.current.pause(); } catch {}
+      currentAudioRef.current = null;
+    }
+    if (currentAudioUrlRef.current) {
+      URL.revokeObjectURL(currentAudioUrlRef.current);
+      currentAudioUrlRef.current = null;
+    }
+    setAudioData(null);
+    setIsSpeaking(false);
+    setConfig((previous) => ({ ...previous, ttsLanguage: language }));
   };
 
   // ---- WhatsApp Share Handlers ----
@@ -568,11 +639,9 @@ const App: React.FC = () => {
       URL.revokeObjectURL(dlUrl);
 
       // Open WhatsApp API send page — prompts "Open WhatsApp?" dialog
-      const phone = (client.whatsapp || client.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
-      const text = encodeURIComponent(
-        `Quote ${config.quoteId}\nCustomer: ${client.company || client.contactName || 'N/A'}\nItems: ${items.length}\nTotal: $${calculateQuoteFinancials(items, config).total.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-      );
-      window.open(`https://api.whatsapp.com/send/?phone=${phone}&text=${text}&type=phone_number&app_absent=0`, '_blank');
+      const phone = client.whatsapp || client.phone || '';
+      const message = quoteWhatsAppMessage(items, config, client.company || client.contactName || 'N/A');
+      window.open(whatsAppSendUrl(phone, message), '_blank', 'noopener,noreferrer');
       if (user) activityBridge.quoteWhatsApp(config.quoteId, client.company || client.contactName || 'N/A', user.username);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
@@ -595,12 +664,12 @@ const App: React.FC = () => {
 
   const handleDownloadAudio = () => {
     if (!audioData) return;
-    const blob = base64ToAudioBlob(audioData);
+    const blob = base64ToWavBlob(audioData);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = `AI-Analysis-${config.quoteId}.mp3`;
+    a.download = `AI-Analysis-${config.quoteId}.wav`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);
@@ -609,7 +678,7 @@ const App: React.FC = () => {
 
   const getAudioAttachment = async (): Promise<string | null> => {
     if (!audioData) return null;
-    const blob = base64ToAudioBlob(audioData);
+    const blob = base64ToWavBlob(audioData);
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onloadend = () => {
@@ -629,7 +698,7 @@ const App: React.FC = () => {
       const newAccount: CustomerAccount = { ...clientData, id: `ACC-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}` };
       updatedAccounts = [...customerAccounts, newAccount];
     }
-    setCustomerAccounts(updatedAccounts);
+    updateCustomerAccounts(updatedAccounts);
     setSyncStatus('syncing');
     const sync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
     if (!sync.synced) {
@@ -644,7 +713,7 @@ const App: React.FC = () => {
       activityBridge.customerAdded(clientData.contactName || '', clientData.company || '', user.username);
     }
     return true;
-  }, [user, customerAccounts]);
+  }, [user, customerAccounts, updateCustomerAccounts]);
 
 
   const handleDeleteFromBook = async (id: string) => {
@@ -754,7 +823,7 @@ const App: React.FC = () => {
   
   const handleSaveAccounts = async (updatedAccounts: CustomerAccount[]) => {
     if (!user) return false;
-    setCustomerAccounts(updatedAccounts);
+    updateCustomerAccounts(updatedAccounts);
     setSyncStatus('syncing');
     const sync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
     if (!sync.synced) {
@@ -829,7 +898,7 @@ const App: React.FC = () => {
       clientAccount = { ...client, id: client.id || `ACC-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}` };
       updatedAccounts = [...customerAccounts, clientAccount];
     }
-    setCustomerAccounts(updatedAccounts);
+    updateCustomerAccounts(updatedAccounts);
     setClient(clientAccount);
     setSyncStatus('syncing');
     const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
@@ -908,7 +977,7 @@ const App: React.FC = () => {
       const updatedAccounts = existingAccount
         ? customerAccounts.map(account => account.id === existingAccount.id ? customer : account)
         : [...customerAccounts, customer];
-      setCustomerAccounts(updatedAccounts);
+      updateCustomerAccounts(updatedAccounts);
       setClient(customer);
       const accountSync = await dbService.saveCustomerAccounts(user.username, updatedAccounts);
       if (!accountSync.synced) {
@@ -1144,7 +1213,7 @@ const App: React.FC = () => {
             const importResult = await dbService.importAllUserData(user.username, importedData);
             
             // Update ALL local state immediately so the user sees the changes without needing a full reload
-            if (importedData.accounts) setCustomerAccounts(importedData.accounts);
+            if (importedData.accounts) updateCustomerAccounts(importedData.accounts);
             if (importedData.quotes) setQuoteHistory(importedData.quotes);
             if (importedData.invoices) setInvoices(importedData.invoices);
             if (importedData.payments) setPayments(importedData.payments);
@@ -1244,7 +1313,7 @@ const App: React.FC = () => {
         return (
           <>
             <ConfigPanel 
-              itemsCount={items.length} onDataLoaded={handleDataLoaded}
+              itemsCount={items.length}
               onConfigChange={setConfig} onClientChange={setClient}
               onAnalyze={handleAnalyze} onSaveQuote={handleSaveQuote}
               onLoadQuote={handleLoadLocalQuote} onCommitToCloud={handleCommitToCloud}
@@ -1268,13 +1337,13 @@ const App: React.FC = () => {
                 <div className="max-w-[1000px] mx-auto mt-4 px-12 no-print flex justify-end items-center gap-2">
                   <div className="flex gap-1 p-1 bg-slate-100 rounded-full">
                     <button 
-                        onClick={() => setConfig(prev => ({ ...prev, ttsLanguage: 'en' }))}
+                        onClick={() => selectTtsLanguage('en')}
                         className={`px-4 py-2 text-[10px] font-black uppercase rounded-full transition-all ${config.ttsLanguage === 'en' ? 'bg-white text-cat-black shadow-sm' : 'text-slate-400'}`}
                     >
                         EN
                     </button>
                     <button 
-                        onClick={() => setConfig(prev => ({ ...prev, ttsLanguage: 'ar' }))}
+                        onClick={() => selectTtsLanguage('ar')}
                         className={`px-4 py-2 text-[10px] font-black uppercase rounded-full transition-all ${config.ttsLanguage === 'ar' ? 'bg-white text-cat-black shadow-sm' : 'text-slate-400'}`}
                     >
                         AR
@@ -1300,6 +1369,15 @@ const App: React.FC = () => {
                     {isSpeaking ? <div className="flex gap-1 items-end h-3"><div className="w-1 bg-cat-yellow animate-[loading_1s_infinite]"></div><div className="w-1 bg-cat-yellow animate-[loading_1.2s_infinite]"></div><div className="w-1 bg-cat-yellow animate-[loading_0.8s_infinite]"></div></div> : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"></path></svg>}
                     {isSpeaking ? "Broadcasting..." : "AI Voice Brief"}
                   </button>
+                  {audioData && (
+                    <audio
+                      controls
+                      preload="metadata"
+                      src={`data:audio/wav;base64,${audioData}`}
+                      className="h-10 w-64"
+                      aria-label={`${config.ttsLanguage === 'ar' ? 'Arabic' : 'English'} AI voice analysis`}
+                    />
+                  )}
                 </div>
               )}
             </div>

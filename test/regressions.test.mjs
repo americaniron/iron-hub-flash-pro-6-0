@@ -20,6 +20,7 @@ test('the standalone Hub Pages origin exposes only a scoped-session, allowlisted
   assert.match(middleware, /STANDALONE_ACCESS_COOKIE = "__Host-iron_hub_access"/);
   assert.match(middleware, /UPSTREAM_ACCESS_COOKIE = "iron_hub_standalone"/);
   assert.match(middleware, /Response\.redirect\(target\.toString\(\), 308\)/);
+  assert.match(middleware, /X-Iron-Suite-Embed/);
   assert.match(middleware, /X-Iron-Hub-Standalone/);
   assert.match(middleware, /standaloneAccessToken\(context\.request\)/);
   assert.match(middleware, /Iron Hub API route not found/);
@@ -50,6 +51,8 @@ test('the standalone Hub uses a Suite handoff while preserving the embedded Suit
   assert.match(auth, /<LogOut/);
   assert.doesNotMatch(auth, /ClerkProvider|useAuth|SignIn|UserButton/);
   assert.match(api, /credentials: init\.credentials \?\? 'same-origin'/);
+  assert.match(api, /window\.location\.pathname\.startsWith\(EMBEDDED_HUB_PATH\)/);
+  assert.match(api, /return `\$\{EMBEDDED_HUB_PATH\}\$\{input\}`/);
   assert.doesNotMatch(api, /Authorization|tokenGetter/);
   assert.match(start, /__Host-iron_hub_handoff/);
   assert.match(start, /state_hash/);
@@ -101,12 +104,49 @@ test('email dispatch has an enforceable deadline, idempotent retries, and only r
   assert.match(email, /idempotencyKey: deliveryAttemptId/);
   assert.match(email, /45_000/);
   assert.match(email, /response\.ok && result\.success === true/);
+  assert.match(email, /MAX_EMAIL_ATTACHMENTS = 5/);
+  assert.match(email, /multiple/);
+  assert.match(email, /aria-label="Add local email attachments"/);
+  assert.match(email, /localAttachmentInputRef\.current\?\.click\(\)/);
+  assert.match(email, /MAX_EMAIL_ATTACHMENTS_BYTES/);
+  assert.match(email, /Generating the quote or invoice PDF before dispatch/);
+  assert.match(email, /attachments: attachmentsForSend\.map/);
   assert.match(worker, /function hubAttachmentPayload/);
-  assert.match(worker, /application\\\/pdf\|audio\\\/mpeg/);
+  assert.match(worker, /HUB_EMAIL_ATTACHMENT_EXTENSIONS/);
+  assert.match(worker, /application\/pdf/);
+  assert.match(worker, /audio\/mpeg/);
+  assert.match(worker, /image\/png/);
   assert.match(worker, /filename=\[A-Za-z0-9\._ -\]\{1,240\}/);
   assert.match(worker, /async function routeHubEmailDispatch/);
   assert.match(worker, /Idempotency-Key/);
   assert.match(worker, /Promise\.race\(\[/);
+});
+
+test('WhatsApp quote and invoice messages use customer-facing sell prices only', () => {
+  const app = hub('App.tsx');
+  const invoiceSystem = hub('components/InvoiceSystem.tsx');
+  const whatsapp = hub('services/whatsAppService.ts');
+
+  assert.match(app, /quoteWhatsAppMessage\(items, config/);
+  assert.match(invoiceSystem, /invoiceWhatsAppMessage\(currentInvoice/);
+  assert.match(invoiceSystem, /<MessageCircle/);
+  assert.match(whatsapp, /calculateQuoteFinancials\(items, config\)/);
+  assert.match(whatsapp, /item\.sellPrice/);
+  assert.match(whatsapp, /item\.extPrice/);
+  assert.doesNotMatch(whatsapp, /item\.unitPrice/);
+  assert.match(whatsapp, /item\.rate/);
+  assert.match(whatsapp, /Secure payment:/);
+});
+
+test('quote-to-invoice customer state cannot be replaced by an older account refresh', () => {
+  const app = hub('App.tsx');
+  const invoiceSystem = hub('components/InvoiceSystem.tsx');
+
+  assert.match(app, /const customerAccountsVersionRef = useRef\(0\)/);
+  assert.match(app, /customerAccountsVersionRef\.current \+= 1/);
+  assert.match(app, /customerAccountsVersionRef\.current === accountsVersion/);
+  assert.match(app, /updateCustomerAccounts\(updatedAccounts\)/);
+  assert.match(invoiceSystem, /disabled=\{!selectedClient\}/);
 });
 
 test('Hub invoice delivery prepares a canonical one-time payment link before it opens email dispatch', () => {
@@ -148,9 +188,13 @@ test('Hub AI uses Claude first, then a scoped Cloudflare GPT fallback, and passe
   const worker = suiteWorker();
   const claudeService = hub('services/claudeService.ts');
   const configPanel = hub('components/ConfigPanel.tsx');
+  const app = hub('App.tsx');
+  const quotePreview = hub('components/QuotePreview.tsx');
+  const email = hub('components/EmailModule.tsx');
 
   assert.match(worker, /async function callAnthropicHubGeneration/);
   assert.match(worker, /function isClaudeFallbackEligible/);
+  assert.match(worker, /"claude-opus-5"/);
   assert.match(worker, /function hubThinkingRequested/);
   assert.match(worker, /function hubAnthropicThinking/);
   assert.match(worker, /return budgetTokens >= 1024 \? \{ type: "enabled", budget_tokens: budgetTokens, display: "omitted" \} : null/);
@@ -168,6 +212,45 @@ test('Hub AI uses Claude first, then a scoped Cloudflare GPT fallback, and passe
   assert.match(claudeService, /signal: AbortSignal\.timeout\(90_000\)/);
   assert.match(claudeService, /signal: AbortSignal\.timeout\(60_000\)/);
   assert.match(claudeService, /Claude and the Cloudflare Workers AI fallback could not complete this request/);
+  assert.match(claudeService, /body: JSON\.stringify\(\{ text, language \}\)/);
+  assert.match(claudeService, /Arabic voice analysis requires a verified Arabic translation/);
+  assert.match(claudeService, /English voice analysis requires a verified English translation/);
+  assert.doesNotMatch(claudeService, /deviceFallback/);
+  assert.match(worker, /Voice analysis language must be en or ar/);
+  assert.match(worker, /model = "xai\/grok-tts"/);
+  assert.match(worker, /language: "ar-SA"/);
+  assert.match(worker, /output_format: \{ codec: "wav", sample_rate: 44100 \}/);
+  assert.match(worker, /@cf\/deepgram\/aura-2-en/);
+  assert.match(worker, /@cf\/deepgram\/aura-1/);
+  assert.match(worker, /speaker: "apollo"/);
+  assert.match(worker, /returnRawResponse: true/);
+  assert.match(worker, /A lower-quality device voice will not be substituted/);
+  assert.match(worker, /mimeType: "audio\/wav"/);
+  assert.match(app, /new Blob\(\[bytes\], \{ type: 'audio\/wav' \}\)/);
+  assert.doesNotMatch(app, /speechSynthesis|SpeechSynthesisUtterance/);
+  assert.match(app, /Promise\.race\(\[/);
+  assert.match(app, /Voice playback did not start before browser activation expired/);
+  assert.match(app, /AI-Analysis-\$\{config\.quoteId\}\.wav/);
+  assert.match(quotePreview, /data:audio\/wav;base64/);
+  assert.match(email, /Voice_Analysis_\$\{config\?\.ttsLanguage\?\.toUpperCase\(\) \|\| 'EN'\}\.wav/);
+});
+
+test('quote diagnosis ignores supplier metadata and cannot invent an unsupported repair scope', () => {
+  const claudeService = hub('services/claudeService.ts');
+  const parser = hub('services/parserService.ts');
+
+  assert.match(claudeService, /export const quoteAnalysisDescription/);
+  assert.match(claudeService, /Supplier warehouse names, cities, availability, lead times, URLs, and extraction artifacts/);
+  assert.match(claudeService, /Never mention data integrity, corruption, merged fields, parser quality, URLs, or supplier metadata/);
+  assert.match(claudeService, /Do not infer a complete repair scope, machine model, engine configuration, or absent components/);
+  assert.match(claudeService, /Use part numbers, quantities, and descriptions together as evidence/);
+  assert.match(claudeService, /Do not claim that unquoted parts are missing or required/);
+  assert.match(claudeService, /Use part numbers, quantities, and descriptions together as evidence/);
+  assert.match(parser, /deliveryMetadataPattern/);
+  assert.match(parser, /page\.objs\.get\(imageKey, \(value: any\) =>/);
+  assert.match(parser, /PDF image extraction timed out/);
+  assert.match(parser, /20_000/);
+  assert.doesNotMatch(claudeService, /Identify any CRITICAL MISSING COMPONENTS/);
 });
 
 test('canonical Hub writes resolve Suite identities securely and do not silently claim local persistence is synchronized', () => {
@@ -233,9 +316,41 @@ test('Hub actions expose failures and do not retain inert controls or browser-co
   assert.match(configPanel, /const handleIntelligentTask = async/);
   assert.match(configPanel, /onClick=\{\(\) => \{ void handleIntelligentTask\(\); \}\}/);
   assert.match(configPanel, /role="alert"/);
+  assert.match(configPanel, /role="status"/);
+  assert.match(configPanel, /Choose a Caterpillar or supplier PDF before processing the manifest/);
+  assert.match(configPanel, /pdfInputRef\.current\.value = ''/);
+  assert.match(configPanel, /const openManifestFilePicker = \(\) =>/);
+  assert.match(configPanel, /<button\s+type="button"\s+onClick=\{openManifestFilePicker\}/);
+  assert.match(configPanel, /<\/button>\s*<input ref=\{pdfInputRef\}/);
+  assert.match(configPanel, /aria-label="Choose a PDF quote"/);
   assert.match(email, /const autoAttachedDocumentRef/);
   assert.doesNotMatch(email, /eslint-disable/);
   assert.doesNotMatch(email, /console\.(log|warn|error)/);
   assert.match(accounts, /signal: AbortSignal\.timeout\(90_000\)/);
   assert.match(accounts, /!res\.ok \|\| result\.success !== true/);
+});
+
+test('the framed Hub applies exactly one proxy prefix to the PDF.js worker URL', () => {
+  const parser = hub('services/parserService.ts');
+  const app = hub('App.tsx');
+  const configPanel = hub('components/ConfigPanel.tsx');
+  const quoteImportBridge = hub('services/quoteImportBridge.ts');
+  const worker = suiteWorker();
+
+  assert.match(parser, /pdfjs\.GlobalWorkerOptions\.workerSrc = pdfWorkerUrl;/);
+  assert.match(parser, /await Promise\.race\(\[imageExtraction, timeout\]\)/);
+  assert.match(parser, /PDF image extraction timed out/);
+  assert.match(app, /const handleDataLoaded = \(newItems: QuoteItem\[\]\) =>/);
+  assert.doesNotMatch(app, /const handleDataLoaded = async/);
+  assert.doesNotMatch(app, /flushSync/);
+  assert.match(app, /const cleanItems = newItems\.map[\s\S]*?setItems\(cleanItems\)/);
+  assert.match(app, /if \(user\) window\.setTimeout\(\(\) => \{/);
+  assert.match(app, /\}\)\(\)\.catch\(\(\) => setSyncStatus\('error'\)\)/);
+  assert.match(app, /subscribeToQuoteImports\(user/);
+  assert.match(configPanel, /publishQuoteImport\(props\.currentUser, items\)/);
+  assert.match(quoteImportBridge, /`\$\{user\.workspaceId\}:\$\{user\.username\}`/);
+  assert.match(quoteImportBridge, /IMPORT_TTL_MS = 60_000/);
+  assert.doesNotMatch(parser, /HUB_PROXY_PATH_PREFIX|resolvePdfWorkerUrl/);
+  assert.match(worker, /replaceAll\('\`\/assets\/', '\`\/hub-proxy\/assets\/'\)/);
+  assert.match(worker, /replaceAll\("`\/api\/" \+ endpoint \+ "`", "`\/hub-proxy\/api\/" \+ endpoint \+ "`"\)/);
 });
