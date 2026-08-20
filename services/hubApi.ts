@@ -3,7 +3,7 @@ const EMBEDDED_HUB_PATH = '/hub-proxy';
 export function resolveHubApiInput(input: RequestInfo | URL): RequestInfo | URL {
   if (
     typeof input === 'string' &&
-    input.startsWith('/api/') &&
+    (input.startsWith('/api/') || input.startsWith('/assets/')) &&
     typeof window !== 'undefined' &&
     window.location.pathname.startsWith(EMBEDDED_HUB_PATH)
   ) {

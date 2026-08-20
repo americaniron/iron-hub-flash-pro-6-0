@@ -1,5 +1,6 @@
 const HUB_API_ENDPOINTS = new Set([
   "activity",
+  "branding",
   "claude",
   "data",
   "data-status",
@@ -40,6 +41,13 @@ function suiteApiUrl(value) {
 function isHubApiPath(pathname) {
   if (!pathname.startsWith("/api/")) return false;
   return HUB_API_ENDPOINTS.has(pathname.slice("/api/".length));
+}
+
+// An organization's logo is an unguessable R2 key that the Suite already serves publicly. It is
+// passed through unauthenticated and same-origin on purpose: an <img> pointing at another origin
+// taints the canvas html2pdf renders from, and the logo would silently vanish from the PDF.
+function isPublicAssetPath(pathname) {
+  return pathname.startsWith("/api/assets/");
 }
 
 function standaloneCanonicalRedirect(request, url) {
@@ -87,12 +95,16 @@ function buildProxyHeaders(request, url, accessToken) {
 }
 
 async function proxyStandaloneHubApi(context, url) {
-  if (!isHubApiPath(url.pathname)) {
+  const publicAsset = isPublicAssetPath(url.pathname);
+  if (!publicAsset && !isHubApiPath(url.pathname)) {
     return json({ error: "Iron Hub API route not found." }, 404);
+  }
+  if (publicAsset && context.request.method !== "GET" && context.request.method !== "HEAD") {
+    return json({ error: "Method not allowed." }, 405);
   }
 
   const accessToken = standaloneAccessToken(context.request);
-  if (!accessToken) {
+  if (!publicAsset && !accessToken) {
     return json({ error: "Sign in is required to use Iron Hub." }, 401);
   }
 
@@ -120,7 +132,8 @@ async function proxyStandaloneHubApi(context, url) {
       if (lower === "set-cookie" || lower === "content-length" || lower === "transfer-encoding") continue;
       headers.set(key, value);
     }
-    headers.set("Cache-Control", "no-store");
+    // An asset is immutable at its key; only API answers must not be cached.
+    if (!publicAsset) headers.set("Cache-Control", "no-store");
     headers.set("X-Content-Type-Options", "nosniff");
     return new Response(response.body, {
       status: response.status,

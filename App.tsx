@@ -6,6 +6,7 @@ import { EmailModule } from './components/EmailModule.tsx';
 import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
+import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
 import { InvoiceSystem } from './components/InvoiceSystem.tsx';
 import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
@@ -197,7 +198,30 @@ const App: React.FC = () => {
   const [audioMimeType, setAudioMimeType] = useState('audio/wav');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
-  const [customLogo, setCustomLogo] = useState<string | null>('/logo.png');
+  // Null until branding has been resolved, so the bundled default is never painted over an
+  // organization's real logo while the server is still answering.
+  const [customLogo, setCustomLogo] = useState<string | null>(null);
+  const [logoNotice, setLogoNotice] = useState<string | null>(null);
+
+  // Branding is resolved from the server on every mount. The Suite remounts this frame on every
+  // route change, so anything held only in state here is gone by the time the user returns —
+  // which is exactly why the logo used to need re-uploading.
+  useEffect(() => {
+    let cancelled = false;
+    void loadBranding().then((branding) => {
+      if (cancelled) return;
+      setCustomLogo(branding.hasCustomLogo && branding.logoUrl ? resolveBrandingUrl(branding.logoUrl) : DEFAULT_LOGO);
+    });
+    const onShellBranding = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data as { type?: unknown; branding?: { logoUrl?: unknown; hasCustomLogo?: unknown } } | null;
+      if (!data || typeof data !== 'object' || data.type !== 'iron-suite-branding') return;
+      const logoUrl = typeof data.branding?.logoUrl === 'string' ? data.branding.logoUrl : '';
+      setCustomLogo(logoUrl ? resolveBrandingUrl(logoUrl) : DEFAULT_LOGO);
+    };
+    window.addEventListener('message', onShellBranding);
+    return () => { cancelled = true; window.removeEventListener('message', onShellBranding); };
+  }, []);
   const [isEmailOpen, setIsEmailOpen] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   
@@ -1021,6 +1045,20 @@ const App: React.FC = () => {
     }
   };
 
+  const handleLogoUpload = async (dataUrl: string) => {
+    // Show it immediately, then persist it for the whole organization. A failure is reported
+    // rather than swallowed: a logo that exists only on this screen is the bug being fixed.
+    setCustomLogo(dataUrl);
+    setLogoNotice(null);
+    const result = await saveBrandingLogo(dataUrl);
+    if (result.saved) {
+      setCustomLogo(result.branding.logoUrl ? resolveBrandingUrl(result.branding.logoUrl) : DEFAULT_LOGO);
+      return;
+    }
+    setLogoNotice(`This logo is only on this screen — it could not be saved for your organization: ${result.error}`);
+    alert(`The logo could not be saved for your organization and will be lost when you navigate away.\n\n${result.error}`);
+  };
+
   const handleLoadFromArchive = (archive: SavedQuote) => {
     const { items: archivedItems, client: archivedClient, config: archivedConfig } = archive.payload;
     const migratedClient: ClientInfo = {
@@ -1084,7 +1122,7 @@ const App: React.FC = () => {
             setClient(migratedClient);
             setConfig(archivedConfig);
             setAiAnalysis(aiAnalysis || null);
-            setCustomLogo(customLogo || '/logo.png');
+            setCustomLogo(customLogo || DEFAULT_LOGO);
             setAudioData(null);
             alert("Local quote file loaded successfully.");
             setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -1345,7 +1383,7 @@ const App: React.FC = () => {
               onDownloadImagePool={handleDownloadImagePool}
               isAnalyzing={isAnalyzing}
               isGeneratingImages={isGeneratingImages} config={config}
-              client={client} customLogo={customLogo} onLogoUpload={setCustomLogo}
+              client={client} customLogo={customLogo} onLogoUpload={handleLogoUpload}
               onRefreshId={() => setConfig(prev => ({ ...prev, quoteId: generateDocumentId(prev.isInvoice) }))}
               addressBook={customerAccounts} onSaveToBook={handleSaveToBook}
               onDeleteFromBook={handleDeleteFromBook} quoteHistory={quoteHistory}
@@ -1414,6 +1452,12 @@ const App: React.FC = () => {
 
   return (
     <ErrorBoundary>
+        {logoNotice && (
+          <div className="fixed top-0 left-0 right-0 z-[300] no-print bg-red-600 text-white text-sm px-6 py-2 flex items-center justify-between gap-4" role="alert">
+            <span>{logoNotice}</span>
+            <button type="button" onClick={() => setLogoNotice(null)} className="font-bold underline shrink-0">Dismiss</button>
+          </div>
+        )}
         <div className="fixed top-0 left-0 right-0 z-[200] no-print px-6 py-5">
           <div className="max-w-[1400px] mx-auto bg-white/90 backdrop-blur-xl border border-white/60 rounded-[2rem] flex justify-between items-center px-6 py-3 shadow-[0_15px_40px_rgba(0,0,0,0.06)] relative overflow-hidden group">
             <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-cat-yellow/50 to-transparent"></div>
