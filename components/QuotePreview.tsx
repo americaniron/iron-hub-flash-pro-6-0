@@ -5,6 +5,7 @@ import { PartImage } from './PartImage.tsx';
 import { Logo } from './Logo.tsx';
 import { calculateQuoteFinancials } from '../services/documentMath.ts';
 import { countryName } from '../services/countryOptions.ts';
+import { DOCUMENT_MARGINS_IN } from '../services/documentLayout.ts';
 
 interface QuotePreviewProps {
   items: QuoteItem[];
@@ -198,7 +199,7 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
           /* Rule 1: Define page layout and guarantee margins. */
           @page {
             size: LETTER;
-            margin: 0.45in 0.5in 0.55in 0.5in !important;
+            margin: ${DOCUMENT_MARGINS_IN.top}in ${DOCUMENT_MARGINS_IN.right}in ${DOCUMENT_MARGINS_IN.bottom}in ${DOCUMENT_MARGINS_IN.left}in !important;
           }
 
           /* Rule 2: Reset and prepare the document body for printing. */

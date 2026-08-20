@@ -7,6 +7,7 @@ import { exportInvoices } from '../services/exportService.ts';
 import { hubApiFetch } from '../services/hubApi.ts';
 import { invoiceWhatsAppMessage, whatsAppSendUrl } from '../services/whatsAppService.ts';
 import { Copy, Download, FileSpreadsheet, FileText, Link2, MessageCircle } from 'lucide-react';
+import { DOCUMENT_MARGINS_IN } from '../services/documentLayout.ts';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -549,7 +550,7 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
 
             @media print {
                 /* == INSTITUTIONAL GRADE PRODUCTION PRINT STYLESHEET V6 == */
-                @page { size: LETTER; margin: 0.45in 0.5in 0.55in 0.5in !important; }
+                @page { size: LETTER; margin: ${DOCUMENT_MARGINS_IN.top}in ${DOCUMENT_MARGINS_IN.right}in ${DOCUMENT_MARGINS_IN.bottom}in ${DOCUMENT_MARGINS_IN.left}in !important; }
                 *, *::before, *::after { box-sizing: border-box !important; }
                 html, body {
                     width: 100% !important; height: auto !important; margin: 0 !important; padding: 0 !important;

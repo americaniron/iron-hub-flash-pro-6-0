@@ -7,6 +7,7 @@ import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
 import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
+import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE } from './services/documentLayout.ts';
 import { InvoiceSystem } from './components/InvoiceSystem.tsx';
 import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
@@ -1344,11 +1345,14 @@ const App: React.FC = () => {
     document.body.classList.add('pdf-generation-mode-active');
     
     const opt = {
-      margin:       [0.35, 0.42, 0.35, 0.42] as [number, number, number, number],
+      // Geometry comes from services/documentLayout, which the Suite Worker's PDFKit renderer
+      // reads as well. The bottom margin is the band the page footer occupies; the old 0.35in
+      // bottom let content run into it, and disagreed with this app's own print stylesheet.
+      margin:       DOCUMENT_HTML2PDF_MARGIN_IN,
       filename:     `${config.quoteId || 'Document'}.pdf`,
       image:        { type: 'jpeg' as const, quality: 0.98 },
       html2canvas:  { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },
-      jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' as const },
+      jsPDF:        { unit: 'in', format: DOCUMENT_PAGE.jsPdfFormat, orientation: 'portrait' as const },
       pagebreak:    {
         mode:  ['css', 'legacy'],
         avoid: ['tr', 'thead', '.address-block', '.summary-table', '.receipt-header']
@@ -1356,6 +1360,12 @@ const App: React.FC = () => {
     };
     
     try {
+      // html2canvas rasterises whatever is on screen at this instant. Plus Jakarta Sans is loaded
+      // with display=swap, so generating before it arrives captures the fallback face — every
+      // measurement shifts and the pagination stops matching the Suite's.
+      if (typeof document !== 'undefined' && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
       const { default: html2pdf } = await import('html2pdf.js');
       const pdfBase64 = await html2pdf().from(element).set(opt).outputPdf('datauristring');
       return pdfBase64;

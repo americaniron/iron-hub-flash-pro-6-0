@@ -153,6 +153,11 @@ const PaymentReceiptModal: React.FC<{
       pagebreak: { mode: ['css', 'legacy'] as const, avoid: ['tr', 'thead', '.receipt-header', '.summary-table'] },
     };
     try {
+      // html2canvas rasterises what is on screen now; generating before the web font arrives
+      // captures the fallback face and every measurement shifts.
+      if (typeof document !== 'undefined' && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
       const { default: html2pdf } = await import('html2pdf.js');
       return await html2pdf().from(element).set(opt).outputPdf('datauristring');
     } catch {
