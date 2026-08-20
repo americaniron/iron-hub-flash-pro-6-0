@@ -54,6 +54,8 @@ export interface ServiceProvider {
 export interface InvoiceData {
   id:string;
   date: string;
+  /** Last edit, ISO-8601. The Suite resolves a sync conflict by comparing this against its own. */
+  updatedAt?: string;
   dueDate: string;
   providerId?: string;
   clientId: string; // Made mandatory
@@ -134,6 +136,8 @@ export interface CustomerAccount extends ClientInfo {
 export interface SavedQuote {
   id: string;
   timestamp: string;
+  /** Last edit, ISO-8601. The Suite resolves a sync conflict by comparing this against its own. */
+  updatedAt?: string;
   author: string;
   title: string;
   total: number;

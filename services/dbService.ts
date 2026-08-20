@@ -277,54 +277,200 @@ function isEmptyDefault(storeName: string, data: any): boolean {
   return false;
 }
 
+// ---- Canonical merge ------------------------------------------------------
+//
+// A canonical read used to REPLACE the local cache with whatever the server returned. Three
+// things made that lossy:
+//   * the Suite capped a canonical document read at 100 rows, so document 101 onwards vanished
+//     from this app the moment it read them back;
+//   * the projection back into hub shape is narrower than what is held locally, so a record that
+//     round-tripped came back thinner than it went out;
+//   * a record that had been written locally but rejected by the server was simply gone.
+//
+// Reads now merge. Nothing local is ever deleted by a read; a record the server has not got is
+// kept and queued to be pushed again.
+
+type CanonicalRecord = Record<string, unknown> & { id?: unknown };
+
+function recordKey(record: unknown): string {
+  if (!record || typeof record !== 'object') return '';
+  const value = (record as CanonicalRecord).id;
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function recordMtime(record: unknown): number {
+  if (!record || typeof record !== 'object') return 0;
+  const source = record as Record<string, unknown>;
+  for (const field of ['updatedAt', 'timestamp', 'date']) {
+    const parsed = Date.parse(String(source[field] ?? ''));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+export type CanonicalMergeResult<T> = {
+  records: T[];
+  /** Records this browser holds that the server did not return — never dropped, always re-queued. */
+  localOnly: T[];
+};
+
+export function mergeCanonicalRecords<T>(serverRecords: unknown, localRecords: unknown): CanonicalMergeResult<T> {
+  const server = Array.isArray(serverRecords) ? serverRecords : [];
+  const local = Array.isArray(localRecords) ? localRecords : [];
+  const merged = new Map<string, unknown>();
+  const order: string[] = [];
+
+  const remember = (record: unknown, key: string) => {
+    if (!merged.has(key)) order.push(key);
+    merged.set(key, record);
+  };
+
+  for (const record of server) {
+    const key = recordKey(record);
+    if (key) remember(record, key);
+  }
+
+  const localOnly: unknown[] = [];
+  for (const record of local) {
+    const key = recordKey(record);
+    if (!key) continue;
+    const existing = merged.get(key);
+    if (existing === undefined) {
+      // The server has never seen this one, or no longer returns it. Keep it and push it again.
+      remember(record, key);
+      localOnly.push(record);
+      continue;
+    }
+    // Last write wins on the record's own mtime. A tie keeps the server copy, which is the one
+    // the rest of the organization can see.
+    if (recordMtime(record) > recordMtime(existing)) remember(record, key);
+  }
+
+  return {
+    records: order.map((key) => merged.get(key)) as T[],
+    localOnly: localOnly as T[],
+  };
+}
+
+async function getCanonicalData<T>(storeName: string, username: string, defaultVal: T): Promise<T> {
+  const localData = await localGet<unknown>(storeName, username);
+  const pending = await pendingCanonicalWrites(username);
+  const pendingRecords = Array.isArray(pending[storeName]) ? (pending[storeName] as unknown[]) : [];
+  const isUp = await checkServerAvailability();
+
+  // Offline, or the server errored: this browser's own copy plus anything still queued IS the
+  // truth. Returning the queue alone — which is what this used to do — hid every record that had
+  // already been confirmed.
+  const localTruth = () => {
+    const merged = mergeCanonicalRecords<unknown>(localData, pendingRecords);
+    return (merged.records.length > 0 ? merged.records : localData ?? defaultVal) as T;
+  };
+
+  if (!isUp) return localTruth();
+
+  const serverData = await serverGet<unknown>(username, storeName);
+  if (serverData === null) {
+    // The read failed. A failed read must never look like an empty organization.
+    if (localData !== null || pendingRecords.length > 0) {
+      void serverSet(username, storeName, localTruth());
+      return localTruth();
+    }
+    return defaultVal;
+  }
+
+  const withLocal = mergeCanonicalRecords<unknown>(serverData, localData);
+  const withPending = mergeCanonicalRecords<unknown>(withLocal.records, pendingRecords);
+  const records = withPending.records;
+  // Anything the server did not return is still owed to it. Queue exactly those, push them, and
+  // clear the queue only when the push is confirmed.
+  const unsent = [...withLocal.localOnly, ...withPending.localOnly];
+  await localSet(storeName, username, records);
+  if (unsent.length > 0) {
+    await rememberPendingCanonicalWrite(username, storeName, unsent);
+    void serverSet(username, storeName, unsent).then(async (synced) => {
+      if (synced) await clearPendingCanonicalWrite(username, storeName);
+    });
+  } else if (pendingRecords.length > 0) {
+    // Everything queued has come back from the server; the queue is genuinely empty.
+    await clearPendingCanonicalWrite(username, storeName);
+  }
+  return records as unknown as T;
+}
+
 // ---- Unified read/write: server-first, local-fallback ----
 async function getData<T>(storeName: string, username: string, defaultVal: T): Promise<T> {
+  if (CANONICAL_STORES.has(storeName)) return getCanonicalData<T>(storeName, username, defaultVal);
   const isUp = await checkServerAvailability();
-  const pending = CANONICAL_STORES.has(storeName) ? await pendingCanonicalWrites(username) : null;
-  if (pending && Object.prototype.hasOwnProperty.call(pending, storeName)) {
-    const localPending = pending[storeName] as T;
-    if (isUp && Array.isArray(localPending) && localPending.length > 0) {
-      void serverSet(username, storeName, localPending).then(async (synced) => {
-        if (synced) await clearPendingCanonicalWrite(username, storeName);
-      });
-    }
-    return localPending;
-  }
 
   if (isUp) {
     const serverData = await serverGet<T>(username, storeName);
     if (serverData !== null) {
-      // Canonical Suite stores are authoritative. An empty server collection
-      // is a valid state and must not be replaced by an old browser cache.
-      if (!CANONICAL_STORES.has(storeName) && isEmptyDefault(storeName, serverData)) {
+      if (isEmptyDefault(storeName, serverData)) {
         const localData = await localGet<T>(storeName, username);
         if (localData !== null && !isEmptyDefault(storeName, localData)) {
-          // Local has real data that server doesn't — use local and push to server
+          // Local has real data that the server does not — use local and push it up.
           void serverSet(username, storeName, localData);
           return localData;
         }
       }
-      // Server has real data — cache locally
       void localSet(storeName, username, serverData);
       return serverData;
     }
   }
 
-  // Fallback: try local IndexedDB
   const localData = await localGet<T>(storeName, username);
   if (localData !== null) {
-    // If server is up but returned null (error), push local data to server (migration)
-    if (isUp) {
-      void serverSet(username, storeName, localData);
-    }
+    if (isUp) void serverSet(username, storeName, localData);
     return localData;
   }
 
   return defaultVal;
 }
 
+/**
+ * Stamp `updatedAt` on canonical records whose content actually changed.
+ *
+ * The Suite decides a sync conflict by comparing mtimes, so a record that is edited here without
+ * a fresh mtime looks older than the Suite's copy and its edit gets refused. Comparing against
+ * the cached copy means an unchanged record keeps its original mtime and does not masquerade as
+ * a fresh edit every time the store is rewritten.
+ */
+function stampCanonicalMtimes(records: unknown, cached: unknown): unknown {
+  if (!Array.isArray(records)) return records;
+  const previous = new Map<string, unknown>();
+  if (Array.isArray(cached)) {
+    for (const record of cached) {
+      const key = recordKey(record);
+      if (key) previous.set(key, record);
+    }
+  }
+  const now = new Date().toISOString();
+  return records.map((record) => {
+    if (!record || typeof record !== 'object') return record;
+    const key = recordKey(record);
+    const before = key ? previous.get(key) : undefined;
+    const withoutMtime = (value: unknown) => {
+      if (!value || typeof value !== 'object') return value;
+      const { updatedAt: _ignored, ...rest } = value as Record<string, unknown>;
+      return rest;
+    };
+    const unchanged = before !== undefined && JSON.stringify(withoutMtime(before)) === JSON.stringify(withoutMtime(record));
+    const existingMtime = (record as Record<string, unknown>).updatedAt;
+    if (unchanged && typeof existingMtime === 'string' && existingMtime) return record;
+    if (unchanged) {
+      const inherited = (before as Record<string, unknown> | undefined)?.updatedAt;
+      return { ...(record as Record<string, unknown>), updatedAt: typeof inherited === 'string' && inherited ? inherited : now };
+    }
+    return { ...(record as Record<string, unknown>), updatedAt: now };
+  });
+}
+
 async function setData<T>(storeName: string, username: string, data: T): Promise<CloudWriteResult> {
   const canonical = CANONICAL_STORES.has(storeName);
+  if (canonical) {
+    const cached = await localGet<unknown>(storeName, username);
+    data = stampCanonicalMtimes(data, cached) as T;
+  }
   const isUp = await checkServerAvailability(canonical);
 
   if (isUp) {
@@ -449,7 +595,10 @@ export const dbService = {
       author: username
     };
     quotes.unshift(newQuote);
-    const sync = await setData('quotes', username, quotes.slice(0, 100));
+    // This used to write `quotes.slice(0, 100)`. Saving the 101st quote therefore deleted the
+    // oldest one from this browser AND from the payload sent to the Suite — the archive silently
+    // capped itself and the dropped quote was gone from both sides.
+    const sync = await setData('quotes', username, quotes);
     return { quote: newQuote, sync };
   },
 

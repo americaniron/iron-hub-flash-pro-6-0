@@ -15,7 +15,7 @@ import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from 
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { activityBridge } from './services/activityBridge.ts';
-import { pushToSuite, checkBridgeConnection, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
+import { pushToSuite, getBridgeHealth, type BridgeSyncProgress, type BridgeSyncResult } from './services/bridgeSync.ts';
 import { calculateQuoteFinancials } from './services/documentMath.ts';
 import { quoteWhatsAppMessage, whatsAppSendUrl } from './services/whatsAppService.ts';
 import { hubApiFetch } from './services/hubApi.ts';
@@ -1177,8 +1177,8 @@ const App: React.FC = () => {
     setBridgeSyncResult(null);
 
     try {
-      const connected = await checkBridgeConnection();
-      if (!connected) {
+      const health = await getBridgeHealth();
+      if (!health.reachable) {
         setBridgeSyncResult({
           success: false,
           timestamp: new Date().toISOString(),
@@ -1187,7 +1187,11 @@ const App: React.FC = () => {
           invoices: { pushed: 0, failed: 0 },
           inventory: { pushed: 0, failed: 0 },
           payments: { pushed: 0, failed: 0 },
-          errors: ['Cannot reach Iron Hub Suite. Check your internet connection or try again later.'],
+          errors: [
+            health.lastError
+              ? `Iron Hub Suite reported: ${health.lastError.message}`
+              : 'Cannot reach Iron Hub Suite. Check your internet connection or try again later.',
+          ],
         });
         setBridgeSyncing(false);
         return;
@@ -1196,7 +1200,12 @@ const App: React.FC = () => {
       const result = await pushToSuite(dbService, user.username, (p) => {
         setBridgeProgress(p);
       });
-      setBridgeSyncResult(result);
+      // A standing failure from a previous attempt is still a failure. Reporting only this run's
+      // errors is how a store that has been rejecting writes for days kept looking healthy.
+      const standing = Object.entries(health.stores)
+        .filter(([, store]) => store.lastError && store.state === 'degraded')
+        .map(([name, store]) => `${name}: ${store.lastError} (last failed ${store.lastErrorAt})`);
+      setBridgeSyncResult(standing.length > 0 ? { ...result, errors: [...result.errors, ...standing] } : result);
     } catch (err: any) {
       setBridgeSyncResult({
         success: false,

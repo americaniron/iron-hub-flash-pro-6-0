@@ -140,13 +140,71 @@ export async function pushToSuite(
   return result;
 }
 
-export async function checkBridgeConnection(): Promise<boolean> {
+export interface BridgeStoreHealth {
+  lastSuccessAt: string | null;
+  lastSuccessRecords: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  pendingRecords: number;
+  state: 'healthy' | 'degraded' | 'unknown';
+}
+
+export interface BridgeHealth {
+  reachable: boolean;
+  status: 'connected' | 'degraded' | 'unavailable';
+  pendingRecords: number;
+  lastError: { store: string | null; message: string; at: string } | null;
+  stores: Record<string, BridgeStoreHealth>;
+  checkedAt: string | null;
+}
+
+const UNREACHABLE: BridgeHealth = {
+  reachable: false,
+  status: 'unavailable',
+  pendingRecords: 0,
+  lastError: null,
+  stores: {},
+  checkedAt: null,
+};
+
+/**
+ * Real synchronization health.
+ *
+ * The Suite used to answer this endpoint with a hardcoded
+ * `{ serverStorage: true, canonicalSuiteData: true }`, so the badge this drives was green even
+ * while every write was being rejected. It now reports per-store outcomes, and this reads them:
+ * "reachable" and "healthy" are two different questions and are answered separately.
+ */
+export async function getBridgeHealth(): Promise<BridgeHealth> {
   try {
     const response = await hubApiFetch(STATUS_ENDPOINT, { signal: AbortSignal.timeout(8_000) });
-    if (!response.ok) return false;
-    const body = await response.json() as { serverStorage?: unknown; canonicalSuiteData?: unknown };
-    return body.serverStorage === true && body.canonicalSuiteData === true;
+    const body = await response.json().catch(() => ({})) as Partial<BridgeHealth> & {
+      serverStorage?: unknown;
+      canonicalSuiteData?: unknown;
+    };
+    const reachable = body.serverStorage === true && body.canonicalSuiteData === true;
+    if (!response.ok && !reachable) {
+      return {
+        ...UNREACHABLE,
+        lastError: body.lastError ?? { store: null, message: `HTTP ${response.status}`, at: new Date().toISOString() },
+        checkedAt: body.checkedAt ?? new Date().toISOString(),
+      };
+    }
+    return {
+      reachable,
+      status: body.status === 'connected' || body.status === 'degraded' || body.status === 'unavailable' ? body.status : reachable ? 'connected' : 'unavailable',
+      pendingRecords: Number(body.pendingRecords) || 0,
+      lastError: body.lastError ?? null,
+      stores: (body.stores as Record<string, BridgeStoreHealth>) ?? {},
+      checkedAt: body.checkedAt ?? new Date().toISOString(),
+    };
   } catch {
-    return false;
+    return UNREACHABLE;
   }
+}
+
+/** Can we write at all? Distinct from "is everything healthy" — a degraded bridge still accepts writes. */
+export async function checkBridgeConnection(): Promise<boolean> {
+  return (await getBridgeHealth()).reachable;
 }
