@@ -51,10 +51,13 @@
                 left: 0;
                 top: 0;
                 width: 100%;
-                padding-bottom: 0.85in !important; /* reserve room for the fixed .print-footer on every page */
+                /* Reserve exactly the footer band from services/documentLayout — 0.55in. It was
+                   0.85in here AND 0.85in of @page margin, so the print path broke a document onto
+                   more pages than exporting the same document did. */
+                padding-bottom: 0.55in !important;
             }
             .print-footer, .print-footer * { visibility: visible; }
-            @page { size: LETTER; margin: 0.5in 0.5in 0.85in 0.5in; }
+            @page { size: LETTER; margin: 0.35in 0.42in 0.55in 0.42in; } /* = DOCUMENT_PAGE_MARGIN_CSS */
             html, body { background: white !important; margin: 0 !important; padding: 0 !important; background-image: none !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             .no-print { display: none !important; }
             table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }

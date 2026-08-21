@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { RECEIPT_HTML2PDF_MARGIN_IN, RECEIPT_MARGINS_IN, drawDocumentFooter } from '../services/documentLayout.ts';
 import { User, CustomerAccount, InvoiceData, Payment, SavedQuote } from '../types.ts';
 import { PaymentReceipt } from './PaymentReceipt.tsx';
 import { exportContacts } from '../services/exportService.ts';
@@ -145,7 +146,9 @@ const PaymentReceiptModal: React.FC<{
     element.classList.add('pdf-generation-mode');
     document.body.classList.add('pdf-generation-mode-active');
     const opt = {
-      margin: [0.25, 0.5, 0.85, 0.5] as [number, number, number, number],
+      // A receipt keeps a deeper bottom band than a quote because its own footer is taller — see
+      // services/documentLayout. It does not get to invent the rest of the page.
+      margin: RECEIPT_HTML2PDF_MARGIN_IN,
       filename: `Receipt-${payment.id}.pdf`,
       image: { type: 'jpeg' as const, quality: 0.98 },
       html2canvas: { scale: 2, useCORS: true, windowWidth: 1100, width: 1100, scrollX: 0, scrollY: 0, backgroundColor: '#ffffff' },
@@ -158,8 +161,14 @@ const PaymentReceiptModal: React.FC<{
       if (typeof document !== 'undefined' && document.fonts?.ready) {
         await document.fonts.ready;
       }
+      const footerLines = Array.from(document.querySelectorAll('.print-footer p'))
+        .map((line) => (line.textContent || '').trim())
+        .filter(Boolean);
       const { default: html2pdf } = await import('html2pdf.js');
-      return await html2pdf().from(element).set(opt).outputPdf('datauristring');
+      const worker = html2pdf().from(element).set(opt).toPdf();
+      const pdf = await worker.get('pdf');
+      drawDocumentFooter(pdf, footerLines, RECEIPT_MARGINS_IN);
+      return await worker.outputPdf('datauristring');
     } catch {
       return null;
     } finally {

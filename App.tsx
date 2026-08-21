@@ -7,7 +7,7 @@ import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Logo } from './components/Logo.tsx';
 import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
-import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE } from './services/documentLayout.ts';
+import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE, drawDocumentFooter } from './services/documentLayout.ts';
 import { InvoiceSystem } from './components/InvoiceSystem.tsx';
 import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
@@ -1366,8 +1366,16 @@ const App: React.FC = () => {
       if (typeof document !== 'undefined' && document.fonts?.ready) {
         await document.fonts.ready;
       }
+      // Read the lines the print-only footer would have shown, and draw them onto the finished
+      // document on every page. html2canvas never captured it — see drawDocumentFooter.
+      const footerLines = Array.from(document.querySelectorAll('.print-footer p'))
+        .map((line) => (line.textContent || '').trim())
+        .filter(Boolean);
       const { default: html2pdf } = await import('html2pdf.js');
-      const pdfBase64 = await html2pdf().from(element).set(opt).outputPdf('datauristring');
+      const worker = html2pdf().from(element).set(opt).toPdf();
+      const pdf = await worker.get('pdf');
+      drawDocumentFooter(pdf, footerLines);
+      const pdfBase64 = await worker.outputPdf('datauristring');
       return pdfBase64;
     } catch {
       return null;

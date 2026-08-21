@@ -2,8 +2,12 @@
  * The single definition of a printed quote or invoice's geometry.
  *
  * MIRRORED FILE — the Suite keeps the same definition at shared/document-layout.ts. The two repos
- * deploy separately, so this is a copy rather than an import; keep them byte-identical below the
- * header, and change both together.
+ * deploy separately, so this is a copy rather than an import.
+ *
+ * What must stay identical is what decides pagination: the page size, the margins, and the band
+ * reserved for the footer. test/document-layout.test.mjs reads the Suite's copy from the checkout
+ * beside this one and fails if those drift. The column grids are deliberately NOT identical — the
+ * Hub's line-item table carries a part image the Suite's does not — and each engine owns its own.
  *
  * The Suite renders these documents with PDFKit inside the Worker; Iron Hub Pro renders them with
  * html2canvas + jsPDF in the browser. Two engines, and — until this file existed — two independent
@@ -138,4 +142,87 @@ export function documentColumnBox(key: string): { x: number; width: number } {
     offset += width;
   }
   throw new Error(`Unknown document column: ${key}`);
+}
+
+
+/**
+ * The payment receipt's own band.
+ *
+ * A receipt is a Hub-only document; it is never synchronised to the Suite, so it does not have to
+ * share the quote's content box. It does have to reserve room for its own footer, which is three
+ * 8pt lines sitting 0.25in up — 0.65in in total — where a quote's are three 6.5pt lines sitting
+ * 0.15in up. Its export reserved 0.85in while its @page reserved 0.85in again, and its own
+ * html2pdf call passed a third geometry entirely.
+ */
+export const RECEIPT_MARGINS_IN = Object.freeze({
+  top: 0.35,
+  right: 0.5,
+  bottom: 0.65,
+  left: 0.5,
+});
+
+export const RECEIPT_HTML2PDF_MARGIN_IN: [number, number, number, number] = [
+  RECEIPT_MARGINS_IN.top,
+  RECEIPT_MARGINS_IN.left,
+  RECEIPT_MARGINS_IN.bottom,
+  RECEIPT_MARGINS_IN.right,
+];
+
+/** `@page { margin: … }` — CSS order is top right bottom left. */
+export const DOCUMENT_PAGE_MARGIN_CSS =
+  `${DOCUMENT_MARGINS_IN.top}in ${DOCUMENT_MARGINS_IN.right}in ${DOCUMENT_MARGINS_IN.bottom}in ${DOCUMENT_MARGINS_IN.left}in`;
+
+/**
+ * jsPDF's built-in faces are WinAnsi-encoded and carry no Arabic glyphs. Text outside that
+ * encoding does not fail — it draws as the wrong characters, which is worse than not drawing it.
+ * An Arabic footer line is therefore left to the print path, which uses the browser's own fonts.
+ */
+const WIN_ANSI_REPRESENTABLE = /^[\u0020-\u007E\u00A0-\u00FF\u2018\u2019\u201C\u201D\u2013\u2014\u20AC]*$/;
+
+export function footerLinesDrawableByJsPdf(lines: readonly string[]): string[] {
+  return lines
+    .map((line) => String(line || "").trim())
+    .filter((line) => line.length > 0 && WIN_ANSI_REPRESENTABLE.test(line));
+}
+
+type JsPdfLike = {
+  internal: { getNumberOfPages(): number; pageSize: { getWidth(): number; getHeight(): number } };
+  setPage(page: number): void;
+  setFontSize(size: number): void;
+  setTextColor(r: number, g: number, b: number): void;
+  text(text: string, x: number, y: number, options?: { align?: string }): void;
+};
+
+/**
+ * Draw the repeated page footer onto a finished jsPDF document.
+ *
+ * The DOM footer is `position: fixed` inside `@media print`, and html2canvas rasterises SCREEN
+ * media, so it never saw it: every exported PDF went out with no address, no telephone and no
+ * page numbers, while the same document printed from the browser had all three. A fixed element
+ * could not have repeated per page under html2canvas in any case — it would have been rasterised
+ * once, wherever it happened to land.
+ *
+ * Mirrors what the Suite's Worker draws: contact lines on the left, page counter on the right,
+ * both inside the bottom margin band.
+ */
+export function drawDocumentFooter(
+  pdf: JsPdfLike,
+  lines: readonly string[],
+  margins: { left: number; right: number } = DOCUMENT_MARGINS_IN,
+): void {
+  const pageCount = pdf.internal.getNumberOfPages();
+  const width = pdf.internal.pageSize.getWidth();
+  const height = pdf.internal.pageSize.getHeight();
+  const baselineIn = pointsToInches(DOCUMENT_PAGE.heightPt - DOCUMENT_FOOTER.baselinePt);
+  const lineHeightIn = pointsToInches(DOCUMENT_FOOTER.fontSizePt * 1.2);
+  const visible = footerLinesDrawableByJsPdf(lines);
+  for (let page = 1; page <= pageCount; page += 1) {
+    pdf.setPage(page);
+    pdf.setFontSize(DOCUMENT_FOOTER.fontSizePt);
+    pdf.setTextColor(108, 117, 125);
+    visible.forEach((line, index) => {
+      pdf.text(line, margins.left, height - baselineIn - (visible.length - 1 - index) * lineHeightIn);
+    });
+    pdf.text(`${page}/${pageCount}`, width - margins.right, height - baselineIn, { align: "right" });
+  }
 }

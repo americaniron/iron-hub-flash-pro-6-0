@@ -216,22 +216,43 @@ test('Hub AI uses Claude first, then a scoped Cloudflare GPT fallback, and passe
   assert.match(claudeService, /Arabic voice analysis requires a verified Arabic translation/);
   assert.match(claudeService, /English voice analysis requires a verified English translation/);
   assert.doesNotMatch(claudeService, /deviceFallback/);
-  assert.match(worker, /Voice analysis language must be en or ar/);
-  assert.match(worker, /model = "xai\/grok-tts"/);
-  assert.match(worker, /language: "ar-SA"/);
-  assert.match(worker, /output_format: \{ codec: "wav", sample_rate: 44100 \}/);
+  // Pin the allowlist, not the error copy. ISSUE-6 widened this to accept the regional tags
+  // Arabic actually arrives as — ar-EG from Egypt, ar-SA from Saudi Arabia — and a test that
+  // matched the old sentence failed for a change that fixed the very thing it was guarding.
+  assert.match(worker, /SUPPORTED_SPEECH_LANGUAGES/);
+  // Tags are matched lower-cased, because that is what normalizeSpeechLanguage compares against.
+  assert.match(worker, /"ar-eg"/);
+  assert.match(worker, /"ar-sa"/);
+  assert.match(worker, /language must be en, ar, or a supported regional tag/);
+  // ISSUE-7 replaced the Workers AI xai/grok-tts path with ElevenLabs, which is the provider the
+  // Hub is required to speak through. Pin what the change was FOR — the multilingual model, the
+  // per-language voice, and the refusal to fall back silently — not the retired model id.
+  assert.match(worker, /ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"/);
+  assert.match(worker, /synthesizeWithElevenLabs/);
+  assert.match(worker, /language === "ar" \? credentials\.voiceIdAr : credentials\.voiceIdEn/);
+  // An English-only model returns silence for Arabic text instead of an error.
+  assert.match(worker, /Arabic needs a multilingual model/);
+  assert.match(worker, /ElevenLabs could not produce this narration/);
   assert.match(worker, /@cf\/deepgram\/aura-2-en/);
   assert.match(worker, /@cf\/deepgram\/aura-1/);
   assert.match(worker, /speaker: "apollo"/);
   assert.match(worker, /returnRawResponse: true/);
   assert.match(worker, /A lower-quality device voice will not be substituted/);
-  assert.match(worker, /mimeType: "audio\/wav"/);
-  assert.match(app, /new Blob\(\[bytes\], \{ type: 'audio\/wav' \}\)/);
+  // ElevenLabs returns MPEG, the Workers AI fallback returns WAV, and the Hub plays whichever it
+  // is told rather than assuming one — assuming WAV is what produced white noise from an MP3.
+  assert.match(worker, /mimeType: "audio\/mpeg"/);
+  assert.match(worker, /mimeType = "audio\/wav"/);
+  assert.match(claudeService, /typeof resp\.mimeType === 'string' \? resp\.mimeType : 'audio\/wav'/);
+  // The blob carries the server-selected type. Hardcoding 'audio/wav' around MP3 bytes is what
+  // played ElevenLabs narration as white noise.
+  assert.match(app, /new Blob\(\[bytes\], \{ type: mimeType \}\)/);
   assert.doesNotMatch(app, /speechSynthesis|SpeechSynthesisUtterance/);
   assert.match(app, /Promise\.race\(\[/);
   assert.match(app, /Voice playback did not start before browser activation expired/);
-  assert.match(app, /AI-Analysis-\$\{config\.quoteId\}\.wav/);
-  assert.match(quotePreview, /data:audio\/wav;base64/);
+  // The download extension follows the audio actually returned. A .wav named MP3 does not open.
+  assert.match(app, /AI-Analysis-\$\{config\.quoteId\}\.\$\{audioMimeType === 'audio\/mpeg' \? 'mp3' : 'wav'\}/);
+  // The data URL carries the server-selected type too, defaulting to WAV only when none is given.
+  assert.match(quotePreview, /toAudioDataUrl = \(base64Audio: string, mimeType = 'audio\/wav'\)/);
   assert.match(email, /Voice_Analysis_\$\{config\?\.ttsLanguage\?\.toUpperCase\(\) \|\| 'EN'\}\.wav/);
 });
 
