@@ -229,7 +229,11 @@ test('Hub AI uses Claude first, then a scoped Cloudflare GPT fallback, and passe
   // per-language voice, and the refusal to fall back silently — not the retired model id.
   assert.match(worker, /ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"/);
   assert.match(worker, /synthesizeWithElevenLabs/);
-  assert.match(worker, /language === "ar" \? credentials\.voiceIdAr : credentials\.voiceIdEn/);
+  // Pin the BEHAVIOUR — Arabic takes the Arabic voice, English the English one — not the exact
+  // punctuation of the expression. The Suite moved this into a shared helper and added optional
+  // chaining (`credentials?.voiceIdAr`), which changed nothing about which voice is chosen and
+  // still failed a regex that had hard-coded the dot.
+  assert.match(worker, /language === "ar" \? credentials\??\.voiceIdAr : credentials\??\.voiceIdEn/);
   // An English-only model returns silence for Arabic text instead of an error.
   assert.match(worker, /Arabic needs a multilingual model/);
   assert.match(worker, /ElevenLabs could not produce this narration/);
@@ -374,4 +378,61 @@ test('the framed Hub applies exactly one proxy prefix to the PDF.js worker URL',
   assert.doesNotMatch(parser, /HUB_PROXY_PATH_PREFIX|resolvePdfWorkerUrl/);
   assert.match(worker, /replaceAll\('\`\/assets\/', '\`\/hub-proxy\/assets\/'\)/);
   assert.match(worker, /replaceAll\("`\/api\/" \+ endpoint \+ "`", "`\/hub-proxy\/api\/" \+ endpoint \+ "`"\)/);
+});
+
+test('a narration refusal is explained in the app instead of dumped into a browser dialog', () => {
+  const app = hub('App.tsx');
+  const claudeService = hub('services/claudeService.ts');
+  const voiceErrors = hub('services/voiceErrors.ts');
+  const toast = hub('components/Toast.tsx');
+
+  // The voice flow spoke through window.alert, which blocks the page, cannot be styled, and prints
+  // whatever string it is handed — which is how "ElevenLabs returned HTTP 402: Free users cannot
+  // use library voices via the API" reached operators verbatim. Pin that the flow now reports
+  // through the toast surface, not that any particular sentence is used.
+  assert.match(toast, /export function useToasts/);
+  assert.match(toast, /export function ToastStack/);
+  assert.match(app, /<ToastStack toasts=\{toasts\} onDismiss=\{dismissToast\} \/>/);
+  assert.doesNotMatch(app, /alert\('Voice playback failed/);
+  assert.doesNotMatch(app, /alert\(e instanceof Error \? e\.message/);
+  assert.doesNotMatch(app, /alert\('AI analysis could not be translated/);
+
+  // The Worker wraps a provider refusal in its own 502, so the provider's status has to travel in
+  // its own field. Collapsing the two made a 402 subscription limit look like a 502 outage.
+  assert.match(claudeService, /export class VoiceSynthesisError/);
+  assert.match(claudeService, /upstreamStatus: errorData\.status/);
+  assert.match(claudeService, /status: response\.status/);
+  assert.match(claudeService, /voiceId: errorData\.voiceId/);
+
+  // handleApiError matches the substring "API key", and the Worker's own 401 sentence contains it.
+  // Routing voice failures through it blamed the Cloudflare Workers AI secrets for an ElevenLabs
+  // credential problem, so a VoiceSynthesisError must be answered before that check runs.
+  assert.match(app, /if \(e instanceof VoiceSynthesisError\) \{\s*\n\s*reportVoiceNotice/);
+
+  // Every status the provider actually returns has an answer that names the field to change.
+  // 402 is deliberately NOT a switch case: a plan restriction also arrives as 400 or 403 with the
+  // reason only in the prose, so entitlement is decided before the status dispatch.
+  for (const status of ['401', '404', '422', '429']) {
+    assert.match(voiceErrors, new RegExp(`case ${status}:`));
+  }
+  assert.match(voiceErrors, /function isPlanRestriction\(status: number \| null, message: string\)/);
+  assert.match(voiceErrors, /if \(isPlanRestriction\(failure\.upstreamStatus, failure\.raw\)\)/);
+  // A 404 is almost always an id pasted from the wrong page, so the id itself has to be shown.
+  assert.match(voiceErrors, /failure\.voiceId\s*\n?\s*\?\s*`\$\{fieldLabel\} is set to \$\{failure\.voiceId\}/);
+  assert.match(voiceErrors, /\(agent\|convai\)_/);
+  assert.match(voiceErrors, /Settings → Integrations → ElevenLabs/);
+
+  // Narration that played in a substitute voice is a success with a caveat. Swallowing the caveat
+  // would let a broken voice setting pass for a working one.
+  assert.match(claudeService, /degraded: resp\.degraded === true/);
+  assert.match(app, /if \(generatedVoice\.degraded\)/);
+  assert.match(app, /describeVoiceDegradation/);
+
+  // A configuration fault recurs identically on every retry, so it outlives the toast.
+  assert.match(app, /setVoiceNotice\(notice\.configuration \? notice : null\)/);
+
+  // The key stays on the server. The Hub never addresses ElevenLabs directly.
+  assert.doesNotMatch(claudeService, /xi-api-key|api\.elevenlabs\.io/);
+  assert.doesNotMatch(app, /xi-api-key|api\.elevenlabs\.io/);
+  assert.doesNotMatch(voiceErrors, /xi-api-key|api\.elevenlabs\.io/);
 });

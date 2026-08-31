@@ -3,7 +3,7 @@
  *
  * Text AI:       Worker-managed Claude with Cloudflare GPT fallback
  * Image Gen:     Claude API image generation tool
- * Voice output:  Cloudflare Workers AI multilingual synthesis
+ * Voice output:  ElevenLabs via the Worker, with a Cloudflare Workers AI fallback
  */
 
 import { QuoteItem, ClientInfo, AppConfig, EmailDraft, InvoiceData } from "../types.ts";
@@ -42,6 +42,38 @@ async function callClaude(params: {
   return await response.json();
 }
 
+/**
+ * A narration refusal, carrying what the Worker knows about it.
+ *
+ * The Worker reports the provider's own status separately from its own, because the two answer
+ * different questions: `status` is whether the request reached ElevenLabs, `upstreamStatus` is what
+ * ElevenLabs said. Collapsing them is what left a 402 subscription limit indistinguishable from a
+ * 502 outage, and sent operators looking for a broken service instead of a Settings field.
+ */
+export class VoiceSynthesisError extends Error {
+  status: number;
+  upstreamStatus: number | null;
+  voiceId: string | null;
+  field: string | null;
+  language: 'en' | 'ar' | null;
+
+  constructor(message: string, detail: {
+    status: number;
+    upstreamStatus?: unknown;
+    voiceId?: unknown;
+    field?: unknown;
+    language?: unknown;
+  }) {
+    super(message);
+    this.name = 'VoiceSynthesisError';
+    this.status = detail.status;
+    this.upstreamStatus = typeof detail.upstreamStatus === 'number' ? detail.upstreamStatus : null;
+    this.voiceId = typeof detail.voiceId === 'string' && detail.voiceId.trim() ? detail.voiceId.trim() : null;
+    this.field = typeof detail.field === 'string' && detail.field.trim() ? detail.field.trim() : null;
+    this.language = detail.language === 'en' || detail.language === 'ar' ? detail.language : null;
+  }
+}
+
 async function callVoiceSynthesis(text: string, language: 'en' | 'ar') {
   const response = await hubApiFetch("/api/elevenlabs-tts", {
     method: "POST",
@@ -52,9 +84,18 @@ async function callVoiceSynthesis(text: string, language: 'en' | 'ar') {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    const error = new Error(errorData.details || errorData.error || `Cloudflare voice synthesis error (${response.status})`) as Error & { status?: number };
-    error.status = response.status;
-    throw error;
+    // `status` in the body is ElevenLabs' status, not this response's — the Worker wraps a
+    // provider refusal in its own 502. Keep them apart so the UI can name the real cause.
+    throw new VoiceSynthesisError(
+      errorData.details || errorData.error || `Voice synthesis error (${response.status})`,
+      {
+        status: response.status,
+        upstreamStatus: errorData.status,
+        voiceId: errorData.voiceId,
+        field: errorData.field,
+        language: errorData.language,
+      },
+    );
   }
 
   return await response.json();
@@ -274,6 +315,12 @@ export interface VoiceSynthesisResult {
   audioBase64: string;
   mimeType: string;
   speechText: string;
+  /** The voice that actually spoke, which is not always the one configured. */
+  voiceId: string | null;
+  /** True when the configured voice was refused and a premade one was substituted. */
+  degraded: boolean;
+  requestedVoiceId: string | null;
+  warning: string | null;
 }
 
 export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): Promise<VoiceSynthesisResult> => {
@@ -307,10 +354,17 @@ export const generateTTS = async (text: string, language: 'en' | 'ar' = 'en'): P
   const resp = await callVoiceSynthesis(textToSpeak, language);
   const audioBase64 = typeof resp.audioBase64 === 'string' ? resp.audioBase64.trim() : '';
   if (!audioBase64) throw new Error('Voice synthesis returned no audio.');
+  const asId = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null);
   return {
     audioBase64,
     mimeType: typeof resp.mimeType === 'string' ? resp.mimeType : 'audio/wav',
     speechText: textToSpeak,
+    voiceId: asId(resp.voiceId),
+    // Narration that played in a substitute voice is a success with a caveat, not a failure. The
+    // caveat has to reach the operator, or a broken voice setting looks like a working one.
+    degraded: resp.degraded === true,
+    requestedVoiceId: asId(resp.requestedVoiceId),
+    warning: asId(resp.warning),
   };
 };
 

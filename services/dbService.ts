@@ -45,6 +45,36 @@ export function sanitizeInventoryForServer(parts: InventoryPart[]): Array<Omit<I
 const poolKeyFor = (partNo: string, description: string): string =>
   `${partNo}_${description}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
+/**
+ * The part-number half of a pool key, with its separator.
+ *
+ * Images were addressed by part number AND description, so ANY edit to a description orphaned
+ * every image already stored for that part — the app then silently regenerated them, and a quote
+ * that had pictures a moment ago came back bare. Cleaning supplier metadata out of descriptions
+ * did exactly that to the whole pool at once.
+ *
+ * A part number identifies the part. The description is volatile text about it, and must not
+ * decide whether a cached image can be found. The trailing separator keeps 524-5565 from matching
+ * 524-55651.
+ */
+const poolPartPrefix = (partNo: string): string =>
+  `${partNo}_`.replace(/[^a-zA-Z0-9_]/g, '_');
+
+const findPooledImage = (
+  pool: Record<string, string>,
+  partNo: string,
+  description: string,
+): string | null => {
+  const exact = pool[poolKeyFor(partNo, description)];
+  if (exact) return exact;
+  if (!partNo.trim()) return null;
+  const prefix = poolPartPrefix(partNo);
+  for (const key of Object.keys(pool)) {
+    if (key.startsWith(prefix) && pool[key]) return pool[key];
+  }
+  return null;
+};
+
 export type CloudWriteResult = {
   synced: boolean;
   cached: boolean;
@@ -739,7 +769,7 @@ export const dbService = {
       if (pool && Object.keys(pool).length > 0) {
         return parts.map(part => {
           if (part.imageUrl) return part;
-          const pooled = pool[poolKeyFor(part.partNo, part.description)];
+          const pooled = findPooledImage(pool, part.partNo, part.description);
           return pooled ? { ...part, imageUrl: pooled } : part;
         });
       }
@@ -815,6 +845,6 @@ export const dbService = {
 
   async findImageInPool(username: string, partNo: string, description: string): Promise<string | null> {
     const pool = await this.getPartsImagePool(username);
-    return pool[poolKeyFor(partNo, description)] || null;
+    return findPooledImage(pool, partNo, description);
   }
 };

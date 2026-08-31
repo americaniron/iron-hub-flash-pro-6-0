@@ -7,6 +7,35 @@ import { readSpreadsheetRows } from './spreadsheetService.ts';
 
 const deliveryMetadataPattern = /(?:\b\d{1,3}\s+)?(?:Atlanta|Waco(?:,\s*TX)?|St\.?\s*Augustine|Brooksville|Palm\s+Bay|Perry)(?:\s+(?:Atlanta|Waco(?:,\s*TX)?|St\.?\s*Augustine|Brooksville|Palm\s+Bay|Perry))*\s*\(\s*\d+\s*(?:-\s*\d*)?\s*(?:(?:business\s*)?days?)?\s*\)(?:\s*\(\s*\d+\s*(?:-\s*\d*)?\s*(?:business\s*)?days?\s*\))?/gi;
 
+/**
+ * Supplier fulfilment metadata that is NOT a Ring Power branch.
+ *
+ * deliveryMetadataPattern only recognises a fixed list of Ring Power branch names, so a quote
+ * from any other supplier kept its availability column inside the part description — which is
+ * how a piston pin came to be described as "59.975MM 6 CAT BACKORDER (6- ) DIAMETER PISTON PIN
+ * 2 54 CAT BACKORDER CAT BACKORDER (6- ) (6- )".
+ *
+ * Matched as a source/stock phrase rather than a name list, so a new warehouse does not need a
+ * code change to be stripped.
+ */
+const supplierStockMetadataPattern = /\b(?:CAT\s+)?(?:BACK\s?ORDER(?:ED)?|DROP\s?SHIP|SPECIAL\s+ORDER|NOT\s+STOCKED|NON\s?STOCK)\b/gi;
+
+/**
+ * A source name followed by its lead-time parenthetical — "CAT YORK CAT BACKORDER (5- )".
+ *
+ * This is the shape every supplier's availability column takes, whoever the warehouse is, so it
+ * replaces the losing game of listing branch names one at a time. The trailing parenthetical is
+ * required, which is what keeps it from eating an ordinary run of description words.
+ */
+const warehouseLeadTimePattern = /\b[A-Z][A-Z.'-]*(?:\s+[A-Z][A-Z.'-]*){0,3}\s*\(\s*\d*\s*-?\s*\d*\s*(?:business\s*)?(?:days?)?\s*\)/g;
+
+/**
+ * A lead-time parenthetical: "(6- )", "(5- 6)", "(3-5 days)", and the empty "( )" left behind
+ * once its contents have been stripped. Only digits, dashes and an optional "days" ever appear
+ * inside one, so this cannot swallow an engineering dimension such as "(M12 x 1.5)".
+ */
+const leadTimeParenPattern = /\(\s*\d*\s*-?\s*\d*\s*(?:business\s*)?(?:days?)?\s*\)/gi;
+
 function normalizePdfText(text: string): string {
   return String(text || '')
     .replace(/[\u2212\u2013\u2014]/g, '-')
@@ -25,6 +54,9 @@ function cleanDescription(text: string): string {
     .replace(/https?:\/\/[^\s]*/gi, ' ')
     .replace(/\bhttps?\b|\blangid\s*=\s*[^\s]+|\b(?:SingleShipmentOrderSummaryView|storeId|catalogId)\S*/gi, ' ')
     .replace(deliveryMetadataPattern, ' ')
+    .replace(warehouseLeadTimePattern, ' ')
+    .replace(supplierStockMetadataPattern, ' ')
+    .replace(leadTimeParenPattern, ' ')
     .replace(/^MM(?:\s+\d+){1,3}\s*/i, ' ')
     .replace(/^MM\s+GAGE\s*/i, ' ')
     .replace(/\bLINE\s+NOTE\b/gi, ' ')
@@ -42,6 +74,15 @@ function cleanDescription(text: string): string {
     .replace(/\s{2,}/g, ' ')
     .trim();
 
+  // Stripping the availability column leaves its neighbouring numeric columns stranded at the
+  // end of the description — "... CASTED VALVE GUIDE 2 50 2 27". Those trailing bare integers
+  // are column bleed, never part of a part name. Only done when metadata was actually removed,
+  // so a description that legitimately ends in a number is left alone.
+  const removedMetadata = normalizePdfText(text) !== cleaned;
+  if (removedMetadata) {
+    cleaned = cleaned.replace(/(?:\s+\d{1,4}\b)+$/, '').trim();
+  }
+
   return cleaned;
 }
 
@@ -54,6 +95,8 @@ function cleanLineOfSummaryJunk(text: string): string {
     // Remove specific summary keywords and everything after them on the line.
     .replace(/(?:SHIPPING\/MISCELLANEOUS|ORDER SUBTOTAL|ORDER TOTAL|HTTPS\?|LANGID=|STATUS:).*/i, '')
     .replace(deliveryMetadataPattern, ' ')
+    .replace(supplierStockMetadataPattern, ' ')
+    .replace(leadTimeParenPattern, ' ')
     // Also attempt to remove stray prices that might have been merged into the description
     .replace(/\s+\$\s?[\d,]+\.\d{2}\s*/, ' ')
     .replace(/\s{2,}/g, ' ')
@@ -79,13 +122,17 @@ function extractAvailability(text: string): { availability: string, remainingTex
   let availability = "";
   let remainingText = text;
 
+  // The first match is the row's own availability column and is what the chip shows. But the
+  // loop used to `break` there, leaving every OTHER availability fragment on the line sitting in
+  // the text — which then became the part description. That is how a valve guide came to be
+  // described as "... 2 50 CAT YORK CAT BACKORDER (5- ) (6- ) 2 27 CAT BACKORDER (6- )".
+  // Keep the first, strip them all.
   for (const pat of availPatterns) {
-    const m = text.match(pat);
-    if (m) {
-      availability = m[0];
-      remainingText = remainingText.replace(pat, " ").trim();
-      break;
-    }
+    const global = new RegExp(pat.source, pat.flags.includes("g") ? pat.flags : pat.flags + "g");
+    const m = remainingText.match(global);
+    if (!m) continue;
+    if (!availability) availability = m[0];
+    remainingText = remainingText.replace(global, " ").replace(/\s{2,}/g, " ").trim();
   }
 
   return { availability, remainingText };
@@ -163,9 +210,16 @@ function processItemLine(item: QuoteItem, lineText: string): void {
   }
   
   // 4. Extract Availability
+  //
+  // A part's availability is ONE value — the availability column of its row. This appended every
+  // match it found, and a row that wraps over four PDF text lines contributes a fragment from
+  // each, which is how a chip came to read "25 IN STOCK 9 DAYS 139 DAYS CONTACT DEALER". The
+  // first match is the row's own column; later ones are continuation lines and other warehouses.
+  // Keep the first, and still strip the rest out of the text so they cannot fall into the
+  // description instead.
   const availResult = extractAvailability(text);
   if (availResult.availability) {
-    item.availability = (item.availability ? item.availability + ' ' : '') + availResult.availability;
+    if (!item.availability) item.availability = availResult.availability;
     text = availResult.remainingText.trim();
   }
 

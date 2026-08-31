@@ -5,6 +5,7 @@ import { QuotePreview } from './components/QuotePreview.tsx';
 import { EmailModule } from './components/EmailModule.tsx';
 import { ItemEditor } from './components/ItemEditor.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { ToastStack, useToasts } from './components/Toast.tsx';
 import { Logo } from './components/Logo.tsx';
 import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
 import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE, drawDocumentFooter } from './services/documentLayout.ts';
@@ -13,7 +14,8 @@ import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
 import { Dashboard } from './components/Dashboard.tsx';
 import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
-import { analyzeQuoteData, generateTTS, generatePartImage, translateText } from './services/claudeService.ts';
+import { analyzeQuoteData, generateTTS, generatePartImage, translateText, VoiceSynthesisError } from './services/claudeService.ts';
+import { describeVoiceDegradation, describeVoiceFailure, type VoiceNotice } from './services/voiceErrors.ts';
 import { dbService } from './services/dbService.ts';
 import { exportInventoryForIronSuite, exportCustomersForIronSuite, exportContactsForIronSuite, exportQuotesForIronSuite, exportInvoicesForIronSuite } from './services/exportService.ts';
 import { activityBridge } from './services/activityBridge.ts';
@@ -225,6 +227,10 @@ const App: React.FC = () => {
   }, []);
   const [isEmailOpen, setIsEmailOpen] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const { toasts, pushToast, dismissToast } = useToasts();
+  // A configuration fault outlives the toast that announced it. It is the same on every retry, so
+  // it stays beside the voice controls until the setting is corrected rather than scrolling away.
+  const [voiceNotice, setVoiceNotice] = useState<VoiceNotice | null>(null);
   
   const resultRef = useRef<HTMLDivElement>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -248,7 +254,11 @@ const App: React.FC = () => {
             setAiAnalysis(translated);
           })
           .catch(() => {
-            alert('AI analysis could not be translated. The current analysis remains available in its original language.');
+            pushToast({
+              tone: 'warning',
+              title: 'The analysis could not be translated',
+              message: 'It remains available in its original language. Switch the document language back, or run the AI analysis again.',
+            });
           })
           .finally(() => {
             setIsAnalyzing(false);
@@ -391,10 +401,13 @@ const App: React.FC = () => {
     if (isApiKeyError(error)) {
       const errString = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
       const isBillingIssue = errString.includes("credit balance") || errString.includes("purchase credits") || errString.includes("billing");
-      alert(isBillingIssue
-        ? "The protected AI service could not complete this request. Claude is tried first and the Cloudflare Workers AI fallback is used automatically for supported billing or rate-limit failures. Please retry shortly."
-        : "The protected AI service is unavailable. Check the Cloudflare Worker AI secrets and retry."
-      );
+      pushToast({
+        tone: 'error',
+        title: isBillingIssue ? 'The AI service could not complete this request' : 'The AI service is unavailable',
+        message: isBillingIssue
+          ? "Claude is tried first and the Cloudflare Workers AI fallback is used automatically for supported billing or rate-limit failures. Please retry shortly."
+          : "Check the Cloudflare Worker AI secrets and retry.",
+      });
       return true;
     }
     return false;
@@ -563,11 +576,30 @@ const App: React.FC = () => {
     }
   };
 
+  /**
+   * Report a narration problem where it can be read and acted on.
+   *
+   * A configuration fault is pinned beside the voice controls as well as announced, because it
+   * will recur identically until someone changes a Settings field — and because the failing voice
+   * id has to stay on screen long enough to be copied.
+   */
+  const reportVoiceNotice = (notice: VoiceNotice) => {
+    pushToast({ tone: notice.tone, title: notice.title, message: notice.message });
+    setVoiceNotice(notice.configuration ? notice : null);
+  };
+
   const handleSpeakAnalysis = async () => {
     if (!aiAnalysis || isSpeaking) return;
     setIsSpeaking(true);
     try {
       const generatedVoice = await generateTTS(aiAnalysis, config.ttsLanguage);
+      if (generatedVoice.degraded) {
+        // The brief still plays. Saying nothing here would let a broken voice setting pass for a
+        // working one, because the only symptom is that a different person is speaking.
+        reportVoiceNotice(describeVoiceDegradation(generatedVoice, config.ttsLanguage));
+      } else {
+        setVoiceNotice(null);
+      }
       // Stop any in-flight audio + revoke its URL before starting new playback
       if (currentAudioRef.current) {
         try { currentAudioRef.current.pause(); } catch {}
@@ -595,7 +627,11 @@ const App: React.FC = () => {
       };
       audio.onended = cleanup;
       audio.onerror = () => {
-        alert('Voice playback failed. Generate the voice analysis again and retry.');
+        pushToast({
+          tone: 'error',
+          title: 'Voice playback failed',
+          message: 'The narration arrived but this browser could not play it. Press AI Voice Brief again, or use the player below to download the clip.',
+        });
         cleanup();
       };
       try {
@@ -625,8 +661,14 @@ const App: React.FC = () => {
         setIsSpeaking(false);
       }
     } catch (e) {
-      if (!handleApiError(e)) {
-        alert(e instanceof Error ? e.message : 'Voice analysis is temporarily unavailable. Please try again.');
+      // A narration refusal is answered here and nowhere else. handleApiError matches on the
+      // substring "API key", which the Worker's own "ElevenLabs rejected the configured API key"
+      // contains — so routing voice failures through it reported an ElevenLabs credential problem
+      // as a missing Cloudflare Workers AI secret, and sent operators to the wrong settings page.
+      if (e instanceof VoiceSynthesisError) {
+        reportVoiceNotice(describeVoiceFailure(e, config.ttsLanguage));
+      } else if (!handleApiError(e)) {
+        reportVoiceNotice(describeVoiceFailure(e, config.ttsLanguage));
       }
       setIsSpeaking(false);
     }
@@ -644,6 +686,9 @@ const App: React.FC = () => {
     setAudioData(null);
     setAudioMimeType('audio/wav');
     setIsSpeaking(false);
+    // The notice names one language's voice. Switching languages asks a different question of a
+    // different setting, so the old answer stops applying.
+    setVoiceNotice(null);
     setConfig((previous) => ({ ...previous, ttsLanguage: language }));
   };
 
@@ -1411,6 +1456,29 @@ const App: React.FC = () => {
             <div className="no-print">{items.length > 0 && <ItemEditor items={items} onUpdate={setItems} config={config} onDeleteItem={(idx) => setItems(prev => prev.filter((_, i) => i !== idx))} currentUser={user} />}</div>
             <div ref={resultRef} className="quote-preview-container printable-area">
               <QuotePreview items={items} client={client} config={config} aiAnalysis={aiAnalysis} customLogo={customLogo} isGeneratingImages={isGeneratingImages} audioData={audioData} audioMimeType={audioMimeType} onConfigChange={setConfig} />
+              {aiAnalysis && voiceNotice && (
+                <div
+                  className={`max-w-[1000px] mx-auto mt-4 px-12 no-print`}
+                  role="status"
+                >
+                  <div className={`rounded-2xl border px-5 py-4 flex items-start gap-3 ${voiceNotice.tone === 'error' ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
+                    <span className={`shrink-0 mt-[1px] text-[9px] font-black uppercase tracking-[0.18em] px-2 py-[3px] rounded-full ${voiceNotice.tone === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+                      Voice setup
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[12px] font-black text-cat-black leading-snug">{voiceNotice.title}</p>
+                      <p className="mt-1 text-[12px] text-slate-600 leading-relaxed break-words">{voiceNotice.message}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setVoiceNotice(null)}
+                      className="shrink-0 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-cat-black transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
               {aiAnalysis && (
                 <div className="max-w-[1000px] mx-auto mt-4 px-12 no-print flex justify-end items-center gap-2">
                   <div className="flex gap-1 p-1 bg-slate-100 rounded-full">
@@ -1470,13 +1538,19 @@ const App: React.FC = () => {
 
   return (
     <ErrorBoundary>
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
         {logoNotice && (
           <div className="fixed top-0 left-0 right-0 z-[300] no-print bg-red-600 text-white text-sm px-6 py-2 flex items-center justify-between gap-4" role="alert">
             <span>{logoNotice}</span>
             <button type="button" onClick={() => setLogoNotice(null)} className="font-bold underline shrink-0">Dismiss</button>
           </div>
         )}
-        <div className="fixed top-0 left-0 right-0 z-[200] no-print px-6 py-5">
+        {/* The bar floats, so the page scrolls UNDERNEATH it. The band around the pill used to be
+            fully transparent, which let line items and party-card text ride up into the gutter
+            beside and above it — "UNITED ARAB EMIRATES" cut in half across the top of the screen.
+            A fade in the page's own background colour hides what passes behind, while keeping the
+            floating-pill look the transparent band was there for. */}
+        <div className="fixed top-0 left-0 right-0 z-[200] no-print px-6 py-5 bg-gradient-to-b from-[#f5f5f5] via-[#f5f5f5] to-transparent pb-10 -mb-5">
           <div className="max-w-[1400px] mx-auto bg-white/90 backdrop-blur-xl border border-white/60 rounded-[2rem] flex justify-between items-center px-6 py-3 shadow-[0_15px_40px_rgba(0,0,0,0.06)] relative overflow-hidden group">
             <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-cat-yellow/50 to-transparent"></div>
             
