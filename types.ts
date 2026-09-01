@@ -148,6 +148,17 @@ export interface CustomerAccount extends ClientInfo {
   internalNotes?: string;
 }
 
+/** Who accepted a totals mismatch, when, and for which exact set of figures. */
+export interface ReconciliationAcknowledgement {
+  by: string;
+  /** ISO-8601. */
+  at: string;
+  /** Fingerprint of the items and totals that were acknowledged; see quoteReadiness.ts. */
+  fingerprint: string;
+  /** The gap as it stood when acknowledged, so the audit trail is readable without recomputing. */
+  gap: number;
+}
+
 export interface SavedQuote {
   id: string;
   timestamp: string;
@@ -156,6 +167,13 @@ export interface SavedQuote {
   author: string;
   title: string;
   total: number;
+  /**
+   * 'draft' when a line item has no part number.  Absent on archives written before this
+   * existed, which are treated as ready.  See services/quoteReadiness.ts.
+   */
+  status?: 'draft' | 'ready';
+  /** Present once someone has accepted a totals mismatch on this quote. */
+  reconciliationAck?: ReconciliationAcknowledgement;
   payload: {
     items: QuoteItem[];
     client: ClientInfo;

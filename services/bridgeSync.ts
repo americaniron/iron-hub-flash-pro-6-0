@@ -7,7 +7,7 @@
  * organization and user.
  */
 import { hubApiFetch } from './hubApi.ts';
-import { savedQuoteReadinessError } from './quoteReadiness.ts';
+import { isDraftQuote, savedQuoteReadinessError } from './quoteReadiness.ts';
 
 import { sanitizeInventoryForServer } from './dbService.ts';
 import type { InventoryPart, SavedQuote } from '../types.ts';
@@ -133,7 +133,8 @@ export async function pushToSuite(
     if (store === 'quotes') {
       const withheld: string[] = [];
       records = (records as SavedQuote[]).filter((quote) => {
-        const blocked = savedQuoteReadinessError(quote, 'synced to IronSuite');
+        const blocked = isDraftQuote(quote) ? savedQuoteReadinessError(quote, 'synced to IronSuite')
+          ?? 'Draft quote: fill in the missing part number before syncing.' : null;
         if (!blocked) return true;
         withheld.push(`${quote?.id ?? 'quote'}: ${blocked}`);
         return false;

@@ -69,3 +69,25 @@ Parsed into `summary.appliedOffers` for audit and read by nothing else — no wa
 pricing. The supplier does not deduct the discount from its own printed total on either fixture,
 so whether Caterpillar honours it at invoicing is unconfirmed; on the September order it is
 exactly 10.00% of subtotal, and auto-deducting would move real margin on an assumption.
+
+## Draft quotes and acknowledged mismatches (added after second review)
+
+**Draft status.** A quote holding a line item with no part number is stamped `status: 'draft'`
+(reusing the word already in `InvoiceData.status` and the IronSuite export's Status column). It
+saves and reloads freely — losing imported work would be a worse failure than the blank — but it
+is held out of everything that leaves. The guarantee is enforced at one chokepoint,
+`dbService.setData`, which strips drafts from the payload sent to the server while keeping them in
+the local cache: no quote with a blank part number can reach IronSuite by any route, including
+callers not yet written. Drafts show a red DRAFT badge in the archive, the blank field renders
+red with a REQUIRED placeholder, and reopening a draft scrolls to and focuses that field.
+
+**Reconciliation acknowledgement.** A quote that does not balance stays sendable, but only after
+an explicit per-quote acknowledgement. The prompt states the real figures — items total, each
+charge, printed total, and the gap — never a generic message. The acknowledgement records who and
+when, is stored on the quote (`reconciliationAck`), and is fingerprinted (FNV-1a) over every
+item's part number, quantity, unit price, extended price and core deposit plus all printed totals.
+Changing any of those invalidates it, so an acknowledgement of one set of numbers can never carry
+over to different numbers. A fresh import clears it; reopening an archived quote restores its own.
+
+Both checks run through a single gate, `ensureQuoteMayLeave`, so a new exit point cannot skip them
+by omission.

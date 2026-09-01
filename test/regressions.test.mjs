@@ -372,7 +372,9 @@ test('the framed Hub applies exactly one proxy prefix to the PDF.js worker URL',
   assert.match(app, /if \(user\) window\.setTimeout\(\(\) => \{/);
   assert.match(app, /\}\)\(\)\.catch\(\(\) => setSyncStatus\('error'\)\)/);
   assert.match(app, /subscribeToQuoteImports\(user/);
-  assert.match(configPanel, /publishQuoteImport\(props\.currentUser, items\)/);
+  // The third argument carries the source document's printed totals for reconciliation;
+  // the assertion still pins that the workspace-scoped bridge is the handoff path.
+  assert.match(configPanel, /publishQuoteImport\(props\.currentUser, items(?:, figures)?\)/);
   assert.match(quoteImportBridge, /`\$\{user\.workspaceId\}:\$\{user\.username\}`/);
   assert.match(quoteImportBridge, /IMPORT_TTL_MS = 60_000/);
   assert.doesNotMatch(parser, /HUB_PROXY_PATH_PREFIX|resolvePdfWorkerUrl/);

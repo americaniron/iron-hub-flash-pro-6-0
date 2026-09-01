@@ -2,6 +2,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AppConfig, ClientInfo, ParseMode, QuoteItem, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus } from '../types.ts';
 import { parseTextData, parsePdfFile, parseExcelFile } from '../services/parserService.ts';
+import { isDraftQuote } from '../services/quoteReadiness.ts';
+import type { ReconciliationFigures } from '../services/quoteReadiness.ts';
 import { performIntelligentTask, transcribeAudio } from '../services/claudeService.ts';
 import { Logo } from './Logo.tsx';
 import { COUNTRY_OPTIONS, normalizeCountryCode } from '../services/countryOptions.ts';
@@ -317,6 +319,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
     try {
         let items: QuoteItem[] = [];
         let notices: string[] = [];
+        let figures: ReconciliationFigures | undefined;
         if (activeTab === ParseMode.PASTE) {
             if (!textInput.trim()) throw new Error('Paste quote line items before processing the manifest.');
             items = parseTextData(textInput);
@@ -326,13 +329,20 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
             const parsed = await parsePdfFile(pdfFile);
             items = parsed.items;
             notices = parsed.warnings;
+            figures = {
+              itemsTotal: parsed.reconciliation.itemsTotal,
+              subtotal: parsed.summary.subtotal,
+              shipping: parsed.summary.shipping,
+              tax: parsed.summary.tax,
+              total: parsed.summary.total,
+            };
         } else if (activeTab === ParseMode.EXCEL) {
             const excelFile = file || excelInputRef.current?.files?.[0];
             if (!excelFile) throw new Error('Choose a CSV or Excel file before processing the manifest.');
             items = await parseExcelFile(excelFile);
         }
         if (items.length === 0) throw new Error('No line items were detected. Confirm that the source contains item quantities and part numbers, then retry.');
-        publishQuoteImport(props.currentUser, items);
+        publishQuoteImport(props.currentUser, items, figures);
         setStatusSuccess(`${items.length} line item${items.length === 1 ? '' : 's'} imported into the quote.`);
         setStatusNotices(notices);
         setStatus("Complete");
@@ -810,7 +820,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                   </div>
                   <div>
-                    <h4 className="text-[12px] font-black uppercase text-slate-900 group-hover:text-cat-black transition-colors">{q.title}</h4>
+                    <h4 className="text-[12px] font-black uppercase text-slate-900 group-hover:text-cat-black transition-colors flex items-center gap-2">
+                      {q.title}
+                      {isDraftQuote(q) && (
+                        <span
+                          className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[8px] font-black tracking-widest"
+                          title="A line item has no part number. This quote cannot be sent, exported or synced until it is filled in."
+                        >
+                          DRAFT
+                        </span>
+                      )}
+                    </h4>
                     <p className="text-[9px] text-slate-400 font-bold uppercase mt-1 group-hover:text-cat-black/60 transition-colors">
                       {new Date(q.timestamp).toLocaleDateString()} • BY {q.author}
                     </p>

@@ -1,6 +1,6 @@
 
 import { InventoryPart, InvoiceData, SavedQuote, CustomerAccount, Payment } from '../types';
-import { savedQuoteReadinessError } from './quoteReadiness.ts';
+import { isDraftQuote, savedQuoteReadinessError } from './quoteReadiness.ts';
 import { loadSpreadsheetLibrary, spreadsheetSafeRows } from './spreadsheetService.ts';
 
 export const exportToExcel = async (data: Record<string, unknown>[], fileName: string, sheetName: string = 'Data') => {
@@ -201,7 +201,8 @@ export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
   // to hand over.  The caller is told which quotes were withheld and why.
   const withheld: string[] = [];
   const exportable = quotes.filter((quote) => {
-    const blocked = savedQuoteReadinessError(quote, 'exported to IronSuite');
+    const blocked = isDraftQuote(quote) ? savedQuoteReadinessError(quote, 'exported to IronSuite')
+      ?? 'Draft quote: fill in the missing part number before exporting.' : null;
     if (!blocked) return true;
     withheld.push(`${quote?.id ?? 'quote'}: ${blocked}`);
     return false;
