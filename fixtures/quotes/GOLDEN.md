@@ -30,3 +30,42 @@ parser did. The item carries a `no part number found` warning.
 discount that is not deducted from their own printed total. The total is reported exactly as
 printed, the discount is parsed into `summary.appliedOffers`, and the discrepancy is raised as a
 warning shown in the Intake Center. Pending a decision on how Iron Hub should treat them.
+
+## Reconciliation (added after review)
+
+Every document that prints a subtotal or total is now cross-checked: the line items' extended
+prices are summed, separately-printed charges are added, and a mismatch becomes a `warnings[]`
+entry. Nothing is ever adjusted to force a match — a parser that balances its own books hides the
+dropped line item this is meant to catch.
+
+| Fixture | items | + charges | printed total | balanced |
+|---|---|---|---|---|
+| `cat-partscatcom-2026-09.pdf` | 2,086.82 | shipping 0.00 | 2,086.82 | yes |
+| `cat-partscatcom-boyd-2026-08.pdf` | 6,808.54 | shipping 208.49, tax 0.00 | 7,017.03 | yes |
+| `ironhub-invoice-2026-04.pdf` | 24.46 | — | 24.46 | yes |
+| `ironhub-quote-roundtrip-2026-02.pdf` | 15,363.28 | freight 305.50, discount −768.16, credit −10.31, core deposits 889.62 | 15,779.93 | yes |
+| `ironhub-quote-redacted-2026-03.pdf` | 0.00 | tax 8,239.67 | 129,757.21 | **no — reported** |
+
+The BOYD $208.49 is the `Shipping/Miscellaneous:` row printed on page 2, not a dropped line item.
+The redacted quote genuinely cannot reconcile because its prices are printed as `xxxxxxxxxx`; that
+is reported loudly and no figure is invented.
+
+## Item-to-image pairing
+
+Verified rather than assumed, using a canvas shim that preserves image identity
+(`test/parser-images.test.mjs`). On the round-trip fixture the old parser paired images
+`IMG#2`–`IMG#6` with its five leading items; the new parser pairs **the same five images in the
+same order**, now attached to `319-0677`, `366-8821`, `381-2499`, `317-8021`, `10R-7672` instead of
+to `25 LBS`, `6 LBS`, `2.1 LBS`, `20.8 LBS`, `10R-7672`. The letterhead (`IMG#1`) stays unattached
+in both. The two spurious old items carried no image, so nothing was lost.
+
+One regression was found and fixed while checking this: the first cut of the refactor dropped
+image pairing entirely on the legacy-strategy fallback path. Legacy strategies now carry their
+anchor coordinates through, and both paths share one association step.
+
+## Applied offers
+
+Parsed into `summary.appliedOffers` for audit and read by nothing else — no warning, no UI, no
+pricing. The supplier does not deduct the discount from its own printed total on either fixture,
+so whether Caterpillar honours it at invoicing is unconfirmed; on the September order it is
+exactly 10.00% of subtotal, and auto-deducting would move real margin on an assumption.

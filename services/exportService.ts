@@ -1,5 +1,6 @@
 
 import { InventoryPart, InvoiceData, SavedQuote, CustomerAccount, Payment } from '../types';
+import { savedQuoteReadinessError } from './quoteReadiness.ts';
 import { loadSpreadsheetLibrary, spreadsheetSafeRows } from './spreadsheetService.ts';
 
 export const exportToExcel = async (data: Record<string, unknown>[], fileName: string, sheetName: string = 'Data') => {
@@ -195,7 +196,21 @@ export const exportContactsForIronSuite = (accounts: CustomerAccount[]) => {
 export const exportQuotesForIronSuite = (quotes: SavedQuote[]) => {
   const rows: Record<string, any>[] = [];
 
-  for (const quote of quotes) {
+  // Same gate as the live bridge: a quote with a line item that has no part number is held
+  // back rather than exported, so the two IronSuite paths cannot disagree about what is safe
+  // to hand over.  The caller is told which quotes were withheld and why.
+  const withheld: string[] = [];
+  const exportable = quotes.filter((quote) => {
+    const blocked = savedQuoteReadinessError(quote, 'exported to IronSuite');
+    if (!blocked) return true;
+    withheld.push(`${quote?.id ?? 'quote'}: ${blocked}`);
+    return false;
+  });
+  if (withheld.length) {
+    alert(`${withheld.length} quote(s) were not exported:\n\n${withheld.join('\n')}`);
+  }
+
+  for (const quote of exportable) {
     const items = quote.payload?.items || [];
     const customerName = quote.payload?.client?.company || '';
     const markupPct = quote.payload?.config?.markupPercentage || 0;

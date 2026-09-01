@@ -9,6 +9,7 @@ import { ToastStack, useToasts } from './components/Toast.tsx';
 import { Logo } from './components/Logo.tsx';
 import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
 import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE, drawDocumentFooter } from './services/documentLayout.ts';
+import { quoteReadinessError } from './services/quoteReadiness.ts';
 import { InvoiceSystem } from './components/InvoiceSystem.tsx';
 import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
@@ -694,6 +695,8 @@ const App: React.FC = () => {
 
   // ---- WhatsApp Share Handlers ----
   const handleWhatsAppQuote = async () => {
+    const blockedByPartNo = quoteReadinessError(items, 'sent to a customer');
+    if (blockedByPartNo) { alert(blockedByPartNo); return; }
     try {
       // Generate and auto-download the PDF
       const pdfBase64 = await generatePdf();
@@ -970,6 +973,8 @@ const App: React.FC = () => {
         alert("Cannot create an invoice from an empty quote or without a client.");
         return;
     }
+    const blockedByPartNo = quoteReadinessError(items, 'converted to an invoice');
+    if (blockedByPartNo) { alert(blockedByPartNo); return; }
     let clientAccount = client.id ? customerAccounts.find(c => c.id === client.id) : customerAccounts.find(c => c.company.toLowerCase() === client.company.toLowerCase());
     let updatedAccounts = customerAccounts;
     if (!clientAccount) {
@@ -1042,6 +1047,8 @@ const App: React.FC = () => {
 
   const handleCommitToCloud = async () => {
     if (!user || items.length === 0) return false;
+    const blockedByPartNo = quoteReadinessError(items, 'synced to IronSuite');
+    if (blockedByPartNo) { alert(blockedByPartNo); return false; }
     const company = client.company.trim() || client.contactName.trim();
     if (!company) {
       alert('Add a customer company or contact before saving this quote.');
@@ -1187,8 +1194,12 @@ const App: React.FC = () => {
 
   const handlePrint = useCallback(() => {
     if (activeSystem === 'quoting' && items.length === 0) return;
+    if (activeSystem === 'quoting') {
+      const blocked = quoteReadinessError(items, 'printed');
+      if (blocked) { alert(blocked); return; }
+    }
     window.print();
-  }, [items.length, activeSystem]);
+  }, [items, activeSystem]);
 
   const handleExportData = async () => {
     if (!user) return;
@@ -1382,6 +1393,10 @@ const App: React.FC = () => {
   }
 
   const generatePdf = async () => {
+    // Gate every PDF at the source: WhatsApp and the email module both come through here, so a
+    // quote with a blank part number cannot become a customer-facing document by any route.
+    const blocked = quoteReadinessError(items, 'exported as a PDF');
+    if (blocked) { alert(blocked); return null; }
     const element = document.querySelector('.printable-area') as HTMLElement;
     if (!element) return null;
     
@@ -1440,7 +1455,12 @@ const App: React.FC = () => {
               onConfigChange={setConfig} onClientChange={setClient}
               onAnalyze={handleAnalyze} onSaveQuote={handleSaveQuote}
               onLoadQuote={handleLoadLocalQuote} onCommitToCloud={handleCommitToCloud}
-              onPrint={() => { window.print(); activityBridge.quotePrinted(config.quoteId, user.username); }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
+              onPrint={() => {
+                const blocked = quoteReadinessError(items, 'printed');
+                if (blocked) { alert(blocked); return; }
+                window.print();
+                activityBridge.quotePrinted(config.quoteId, user.username);
+              }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
               onConvertToInvoice={handleConvertToInvoice} onGenerateAllImages={handleGenerateAllImages}
               onExportData={handleExportData} onImportData={handleImportData}
               onDownloadImagePool={handleDownloadImagePool}

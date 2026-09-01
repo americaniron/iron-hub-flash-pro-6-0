@@ -15,8 +15,19 @@ export interface DocumentSummary {
   shipping?: number;
   tax?: number;
   total?: number;
-  /** Discounts printed on the document.  Never subtracted from `total` — see `warnings`. */
+  /**
+   * Supplier promotional discount, parsed for audit only.  Nothing user-facing reads it and it
+   * is excluded from every reconciliation — see the note in `extractDocumentSummary`.
+   */
   appliedOffers?: number;
+  /** Freight or handling charged as a separate line, signed as printed. */
+  freight?: number;
+  /** A document-level discount, signed as printed (normally negative). */
+  discount?: number;
+  /** A credit or refund applied to the document, signed as printed (normally negative). */
+  creditRefund?: number;
+  /** Refundable core deposits totalled separately from the line items. */
+  coreDeposits?: number;
   currency?: string;
   accountNumber?: string;
   dealerStore?: string;
@@ -172,6 +183,25 @@ export function extractDocumentSummary(pages: readonly PageModel[]): DocumentSum
     if (summary.total === undefined && /^total\b/i.test(text) && !/\b(?:tax|weight|core|deposits?)\b/i.test(text)) {
       summary.total = labelledMoney(rows, index, /^total\b:?/i) ?? undefined;
     }
+    // Charge lines that sit between the subtotal and the total.  Captured so the reconciliation
+    // can account for them: without these, IRON HUB's own quote template appears to be missing
+    // $416.65 of line items when it is in fact printing freight, a discount, a credit and core
+    // deposits as separate rows.
+    if (summary.freight === undefined && /\b(?:freight(?:\s+factor)?|handling)\b/i.test(text)) {
+      summary.freight = labelledMoney(rows, index, /\b(?:freight(?:\s+factor)?|handling)\b(?:\s*\([^)]*\))?:?/i) ?? undefined;
+    }
+    if (summary.discount === undefined && /\b(?:customer\s+loyalty\s+)?discount\b/i.test(text)) {
+      summary.discount = labelledMoney(rows, index, /\b(?:customer\s+loyalty\s+)?discount\b(?:\s*\([^)]*\))?:?/i) ?? undefined;
+    }
+    if (summary.creditRefund === undefined && /\bcredit\s*\/?\s*(?:or\s*)?refund\b/i.test(text)) {
+      summary.creditRefund = labelledMoney(rows, index, /\bcredit\s*\/?\s*(?:or\s*)?refund\b:?/i) ?? undefined;
+    }
+    // Anchored to the start of the row: an item's own "INJECTOR CORE DEPOSIT" subline would
+    // otherwise be read as the document-level total, giving one item's $148.27 in place of the
+    // $889.62 printed against TOTAL CORE DEPOSITS.
+    if (summary.coreDeposits === undefined && /^(?:total\s+)?core\s+deposits?\b/i.test(text)) {
+      summary.coreDeposits = labelledMoney(rows, index, /^(?:total\s+)?core\s+deposits?\b:?/i) ?? undefined;
+    }
     if (summary.appliedOffers === undefined && /\bapplied\s+offers\b/i.test(text)) {
       const value = labelledMoney(rows, index, /\bapplied\s+offers\b:?[\s-]*/i);
       // Recorded as a positive discount amount regardless of how the document signs it.
@@ -216,18 +246,12 @@ export function extractDocumentSummary(pages: readonly PageModel[]): DocumentSum
     }
   }
 
-  // The discrepancy is surfaced, never resolved: on the September Parts.Cat.Com order the
-  // $208.68 of applied offers is not deducted from the $2,086.82 total the document prints.
-  // Quoting from a silently "corrected" total would be worse than quoting from a flagged one.
-  if (summary.appliedOffers && summary.total !== undefined && summary.subtotal !== undefined) {
-    const shipping = summary.shipping ?? 0;
-    const withDiscount = Math.round((summary.subtotal + shipping - summary.appliedOffers) * 100) / 100;
-    if (Math.abs(withDiscount - summary.total) > 0.02) {
-      summary.warnings.push(
-        `Applied offers of ${summary.appliedOffers.toFixed(2)} are not reflected in the printed total of ${summary.total.toFixed(2)}. The total is reported exactly as printed; confirm how the discount should be applied before quoting.`,
-      );
-    }
-  }
+  // Applied offers are parsed and kept for audit, but deliberately produce no warning and feed
+  // nothing in the UI or the pricing path.  On both Parts.Cat.Com fixtures the discount is not
+  // deducted from the supplier's own printed total, so whether Caterpillar honours it at
+  // invoicing is unconfirmed; on the September order it is exactly 10.00% of subtotal, and
+  // auto-deducting it would move real margin on the strength of an assumption.  Treat
+  // `appliedOffers` as absent for every user-facing purpose until that is settled.
 
   return summary;
 }

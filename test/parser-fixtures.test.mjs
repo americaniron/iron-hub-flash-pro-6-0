@@ -61,13 +61,56 @@ test('the September 2026 order header block is captured', async () => {
   assert.equal(summary.orderedBy, 'ADAM qadah');
 });
 
-test('applied offers are flagged, never silently subtracted from the printed total', async () => {
-  const { summary, warnings } = await parse('cat-partscatcom-2026-09.pdf');
-  // The document prints a $208.68 discount that is not deducted from its own $2,086.82 total.
-  // The total must be reported exactly as printed and the discrepancy surfaced to the user.
-  assert.equal(summary.total, 2086.82);
+test('applied offers are parsed for audit but reach nothing user-facing', async () => {
+  // Policy: the supplier does not deduct the discount from its own printed total, so whether
+  // Caterpillar honours it at invoicing is unconfirmed.  On this order it is exactly 10.00% of
+  // subtotal, so auto-deducting would move real margin on an assumption.  Keep the number,
+  // surface nothing, and let it touch neither the total nor the reconciliation.
+  const { summary, warnings, reconciliation } = await parse('cat-partscatcom-2026-09.pdf');
   assert.equal(summary.appliedOffers, 208.68);
-  assert.match(warnings.join(' '), /Applied offers of 208\.68 are not reflected/);
+  assert.equal(Math.round((summary.appliedOffers / summary.subtotal) * 10000) / 100, 10);
+  assert.equal(summary.total, 2086.82, 'the printed total must be reported exactly as printed');
+  assert.doesNotMatch(warnings.join(' '), /applied offers/i);
+  assert.equal(reconciliation.balanced, true, 'applied offers must not unbalance the check');
+});
+
+test('BOYD reconciles once its printed shipping line is accounted for', async () => {
+  // 6,808.54 of line items + 208.49 Shipping/Miscellaneous + 0.00 Total Tax = 7,017.03, the
+  // printed ORDER TOTAL.  The 208.49 is a charge row on page 2, not a dropped line item.
+  const { items, summary, reconciliation } = await parse('cat-partscatcom-boyd-2026-08.pdf');
+  assert.equal(items.length, 1);
+  assert.equal(reconciliation.itemsTotal, 6808.54);
+  assert.equal(summary.subtotal, 6808.54);
+  assert.equal(summary.shipping, 208.49);
+  assert.equal(summary.tax, 0);
+  assert.equal(summary.total, 7017.03);
+  assert.equal(
+    Math.round((reconciliation.itemsTotal + summary.shipping + summary.tax) * 100) / 100,
+    summary.total,
+  );
+  assert.equal(reconciliation.balanced, true);
+});
+
+test('every fixture with readable prices reconciles against its printed totals', async () => {
+  for (const name of [
+    'cat-partscatcom-2026-09.pdf',
+    'cat-partscatcom-boyd-2026-08.pdf',
+    'ironhub-invoice-2026-04.pdf',
+    'ironhub-quote-roundtrip-2026-02.pdf',
+  ]) {
+    const { reconciliation } = await parse(name);
+    assert.equal(reconciliation.balanced, true, `${name} did not reconcile: ${reconciliation.warnings.join(' ')}`);
+  }
+});
+
+test('a document whose prices cannot be read reports the imbalance instead of hiding it', async () => {
+  // Prices on this quote are printed as "xxxxxxxxxx".  The right outcome is a loud mismatch,
+  // never a figure adjusted to make the arithmetic close.
+  const { summary, reconciliation } = await parse('ironhub-quote-redacted-2026-03.pdf');
+  assert.equal(reconciliation.balanced, false);
+  assert.equal(reconciliation.itemsTotal, 0);
+  assert.equal(summary.subtotal, 121517.54, 'the printed subtotal must be left exactly as printed');
+  assert.match(reconciliation.warnings.join(' '), /nothing has been adjusted/);
 });
 
 test('the geometry core parses the new Caterpillar format with every adapter disabled', async () => {
@@ -194,5 +237,18 @@ test('the legacy strategies are still registered and still reachable', async () 
 test('a disagreement between the core and a legacy strategy is recorded, and the core wins', async () => {
   const result = await parse('cat-partscatcom-boyd-2026-08.pdf');
   assert.equal(result.strategy.startsWith('geometry-core'), true);
-  assert.match(result.warnings.join(' '), /Legacy strategy "table-based" found 6 item\(s\)/);
+  // Recorded as engineering detail, not shown to the user: a salesperson reading "Legacy
+  // strategy table-based found 6 items" learns nothing and stops reading the panel.
+  assert.match(result.diagnostics.join(' '), /Legacy strategy "table-based" found 6 item\(s\)/);
+  assert.doesNotMatch(result.warnings.join(' '), /Legacy strategy/);
+});
+
+test('the Intake Center panel carries checks, not engineering noise', async () => {
+  const boyd = await parse('cat-partscatcom-boyd-2026-08.pdf');
+  // Everything reconciles and every part number is present, so there is nothing to check.
+  assert.deepEqual(boyd.warnings, []);
+
+  const redacted = await parse('ironhub-quote-redacted-2026-03.pdf');
+  assert.ok(redacted.warnings.length > 0, 'an unreadable price must reach the user');
+  assert.doesNotMatch(redacted.warnings.join(' '), /Legacy strategy|Strategy:/);
 });

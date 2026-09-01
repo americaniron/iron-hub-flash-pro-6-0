@@ -7,9 +7,10 @@
  * organization and user.
  */
 import { hubApiFetch } from './hubApi.ts';
+import { savedQuoteReadinessError } from './quoteReadiness.ts';
 
 import { sanitizeInventoryForServer } from './dbService.ts';
-import type { InventoryPart } from '../types.ts';
+import type { InventoryPart, SavedQuote } from '../types.ts';
 
 const DATA_ENDPOINT = '/api/data';
 const STATUS_ENDPOINT = '/api/data-status';
@@ -122,9 +123,26 @@ export async function pushToSuite(
     const rawRecords = Array.isArray(data[store]) ? data[store] as unknown[] : [];
     // The Suite Worker rejects base64 data: image URLs on the canonical
     // inventory endpoint (422) — send part data without them.
-    const records = store === 'inventory'
+    let records = store === 'inventory'
       ? sanitizeInventoryForServer(rawRecords as InventoryPart[])
       : rawRecords;
+
+    // A quote holding a line item with no part number must not become an IronSuite record.
+    // Held back rather than dropped: it stays in the local archive and is reported here, so
+    // the next push picks it up once the part number is filled in.
+    if (store === 'quotes') {
+      const withheld: string[] = [];
+      records = (records as SavedQuote[]).filter((quote) => {
+        const blocked = savedQuoteReadinessError(quote, 'synced to IronSuite');
+        if (!blocked) return true;
+        withheld.push(`${quote?.id ?? 'quote'}: ${blocked}`);
+        return false;
+      });
+      if (withheld.length) {
+        result.quotes.failed += withheld.length;
+        result.errors.push(...withheld);
+      }
+    }
     await synchronizeStore(store, records, result, index, orderedStores.length, onProgress);
     if (records.length > 0 && result[store].failed === 0 && result[store].pushed === records.length) {
       await db.markCanonicalStoresSynchronized?.(username, [store]);

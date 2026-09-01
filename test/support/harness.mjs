@@ -101,6 +101,34 @@ export async function loadParserService() {
 }
 
 /**
+ * A canvas that preserves image IDENTITY rather than pixels.
+ *
+ * Node has no canvas, so the default shim below disables image extraction entirely — which is
+ * right for line-item snapshots but means nothing exercises the item-to-image pairing.  This
+ * variant hands back a stable id per decoded image ("IMG#3@1024x1024") so a test can assert
+ * which image each item ended up with.  Install it BEFORE loadParserService.
+ */
+export function installIdentityCanvasShims() {
+  let counter = 0;
+  globalThis.window = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t) };
+  globalThis.document = {
+    createElement: () => {
+      const canvas = { width: 0, height: 0 };
+      canvas.getContext = () => ({
+        createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+        putImageData: () => {},
+        drawImage: () => {},
+      });
+      canvas.toDataURL = () => `IMG#${++counter}@${canvas.width}x${canvas.height}`;
+      return canvas;
+    },
+  };
+  globalThis.HTMLImageElement ??= class {};
+  globalThis.HTMLCanvasElement ??= class {};
+  globalThis.ImageBitmap ??= class {};
+}
+
+/**
  * Minimal browser surface.  `getContext()` returning null makes the image-extraction branch a
  * no-op, so snapshots never carry canvas output — the parser must produce identical line items
  * with and without images, and this keeps that honest.

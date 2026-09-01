@@ -7,6 +7,7 @@ import { CoreItem, extractItems } from './parser/core.ts';
 import { DocumentSummary, extractDocumentSummary } from './parser/documentSummary.ts';
 import { selectAdapter } from './parser/adapters/index.ts';
 import { describeEmptyResult, validateItems } from './parser/validate.ts';
+import { Reconciliation, reconcileTotals } from './parser/reconcile.ts';
 
 // --- Helper Functions ---
 
@@ -845,10 +846,29 @@ export interface PdfParseResult {
   clientInfo: Partial<ClientInfo>;
   /** Order-level totals and header fields.  Totals are reported as printed, never recomputed. */
   summary: DocumentSummary;
-  /** Everything the parser was unsure about, in the order it became unsure. */
+  /**
+   * Things a person should check before quoting: a total that does not reconcile, a redacted
+   * price, a line with no part number.  This is what the Intake Center shows.
+   */
   warnings: string[];
+  /**
+   * Engineering detail — which strategy produced the items and where the legacy strategies
+   * disagreed.  Deliberately kept out of the UI: "Legacy strategy table-based found 6 items"
+   * means nothing to a parts salesperson, and burying the reconciliation warnings in noise is
+   * how a panel stops being read.
+   */
+  diagnostics: string[];
   /** Which strategy produced `items` — "geometry-core+caterpillar", "legacy:ring-power", ... */
   strategy: string;
+  /** Line-item total checked against the printed subtotal and total.  Never auto-corrected. */
+  reconciliation: Reconciliation;
+}
+
+/** A legacy strategy's output, with the anchor coordinates needed to pair images. */
+interface LegacyResult {
+  name: string;
+  items: QuoteItem[];
+  anchors: { pageNumber: number; y: number }[];
 }
 
 /** One page's worth of input for the legacy line-oriented strategies. */
@@ -1107,6 +1127,7 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
   }
 
   const warnings: string[] = [];
+  const diagnostics: string[] = [];
   const pages: PageModel[] = [];
   const legacyPages: LegacyPageInput[] = [];
   const imagesByPage = new Map<number, { y: number; x: number; dataUrl: string; width: number; height: number }[]>();
@@ -1200,6 +1221,13 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
 
   let items: QuoteItem[] = coreValidated.accepted.map(toQuoteItem);
   let coreItems: CoreItem[] = coreValidated.accepted;
+  // Bottom-origin PDF coordinates, the same space the operator list reports image positions in.
+  // pageModel.height - item.anchorY is exactly transform[5], so this reproduces the coordinate
+  // the previous parser matched on.
+  let imageAnchors: { pageNumber: number; y: number }[] = coreValidated.accepted.map((item) => ({
+    pageNumber: item.pageNumber,
+    y: (pages.find((p) => p.pageNumber === item.pageNumber)?.height ?? 0) - item.anchorY,
+  }));
   let strategy = items.length
     ? `geometry-core${selection.adapter && selection.adapter.name !== 'generic' ? `+${selection.adapter.name}` : ''}`
     : '';
@@ -1210,7 +1238,7 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
   if (items.length) {
     for (const result of legacyResults) {
       if (result.items.length && result.items.length !== items.length) {
-        warnings.push(
+        diagnostics.push(
           `Legacy strategy "${result.name}" found ${result.items.length} item(s) where the layout engine found ${items.length}; the layout engine's result was used.`,
         );
       }
@@ -1220,10 +1248,15 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
       const validated = validateItems(result.items, { families: selection.options.families });
       warnings.push(...validated.warnings);
       if (validated.accepted.length) {
+        // Map surviving items back to their anchors: validation may have dropped some, so the
+        // index into `result.items` is what lines an item up with its coordinate.
+        imageAnchors = validated.accepted
+          .map((item) => result.items.indexOf(item as QuoteItem))
+          .map((index, position) => result.anchors[index] ?? result.anchors[position] ?? { pageNumber: 1, y: 0 });
         items = validated.accepted;
         coreItems = [];
         strategy = `legacy:${result.name}`;
-        warnings.push(`The layout engine found no items; fell back to the legacy "${result.name}" strategy.`);
+        diagnostics.push(`The layout engine found no items; fell back to the legacy "${result.name}" strategy.`);
         break;
       }
     }
@@ -1247,16 +1280,14 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
   // Pair each item with the nearest image on its own page.  Coordinates from the operator list
   // are bottom-origin, so the anchor is converted back before comparing.
   for (let index = 0; index < items.length; index++) {
-    const source = coreItems[index];
-    if (!source) break;
-    const pageModel = pages.find((p) => p.pageNumber === source.pageNumber);
-    const available = imagesByPage.get(source.pageNumber);
-    if (!pageModel || !available || !available.length) continue;
-    const anchorFromBottom = pageModel.height - source.anchorY;
+    const anchor = imageAnchors[index];
+    if (!anchor) continue;
+    const available = imagesByPage.get(anchor.pageNumber);
+    if (!available || !available.length) continue;
     let bestIndex = -1;
     let minDiff = Infinity;
     available.forEach((image, i) => {
-      const diff = Math.abs(image.y - anchorFromBottom);
+      const diff = Math.abs(image.y - anchor.y);
       // Keep logos and footer art away from parts by requiring a nearby row.
       if (diff < minDiff && diff < 300) {
         minDiff = diff;
@@ -1269,21 +1300,39 @@ export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
     }
   }
 
-  return { items, clientInfo, summary, warnings, strategy };
+  // Cross-check the arithmetic last, once the final item set is known whichever strategy
+  // produced it.  A disagreement is reported, never resolved by adjusting a figure.
+  const reconciliation = reconcileTotals(coreItems.length ? coreItems : [], summary);
+  if (coreItems.length) {
+    for (const warning of reconciliation.warnings) {
+      if (/printed no extended price/.test(warning)) diagnostics.push(warning);
+      else warnings.push(warning);
+    }
+  }
+
+  diagnostics.push(`Strategy: ${strategy}.`);
+  return { items, clientInfo, summary, warnings, diagnostics, strategy, reconciliation };
 };
 
 /** Run every legacy strategy over every page, collecting whatever each one claims to find. */
 function runLegacyStrategies(
   legacyPages: readonly LegacyPageInput[],
   state: LegacyState,
-): { name: string; items: QuoteItem[] }[] {
-  const results: { name: string; items: QuoteItem[] }[] = [];
+): LegacyResult[] {
+  const results: LegacyResult[] = [];
   for (const strategy of LEGACY_STRATEGIES) {
     const collected: QuoteItem[] = [];
+    // Anchors are carried alongside the items so the fallback path can still pair images.
+    // These are bottom-origin PDF coordinates, exactly as the legacy strategies produced them.
+    const anchors: { pageNumber: number; y: number }[] = [];
     for (const input of legacyPages) {
       if (!strategy.claims(input, state)) continue;
       try {
-        collected.push(...strategy.run(input, state).items);
+        const { items, yCoords } = strategy.run(input, state);
+        items.forEach((item, index) => {
+          collected.push(item);
+          anchors.push({ pageNumber: input.pageNumber, y: yCoords[index] ?? 0 });
+        });
       } catch {
         // A legacy strategy throwing must never take the parse down; the core already ran.
       }
@@ -1291,6 +1340,7 @@ function runLegacyStrategies(
     results.push({
       name: strategy.name,
       items: collected.map((item) => ({ ...item, desc: cleanDescription(item.desc) })),
+      anchors,
     });
   }
   return results;
