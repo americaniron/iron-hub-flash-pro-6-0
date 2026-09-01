@@ -322,7 +322,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         let figures: ReconciliationFigures | undefined;
         if (activeTab === ParseMode.PASTE) {
             if (!textInput.trim()) throw new Error('Paste quote line items before processing the manifest.');
-            items = parseTextData(textInput);
+            const pasted = parseTextData(textInput);
+            items = pasted.items;
+            notices = pasted.warnings;
         } else if (activeTab === ParseMode.PDF) {
             const pdfFile = file || pdfInputRef.current?.files?.[0];
             if (!pdfFile) throw new Error('Choose a Caterpillar or supplier PDF before processing the manifest.');
@@ -339,7 +341,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         } else if (activeTab === ParseMode.EXCEL) {
             const excelFile = file || excelInputRef.current?.files?.[0];
             if (!excelFile) throw new Error('Choose a CSV or Excel file before processing the manifest.');
-            items = await parseExcelFile(excelFile);
+            const sheet = await parseExcelFile(excelFile);
+            items = sheet.items;
+            notices = sheet.warnings;
         }
         if (items.length === 0) throw new Error('No line items were detected. Confirm that the source contains item quantities and part numbers, then retry.');
         publishQuoteImport(props.currentUser, items, figures);

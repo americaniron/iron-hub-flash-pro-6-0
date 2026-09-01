@@ -807,17 +807,48 @@ function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCo
   return { items, yCoords };
 }
 
-export const parseTextData = (text: string): QuoteItem[] => {
+/** What a paste or spreadsheet import produced, plus anything the guard had to say about it. */
+export interface ItemParseResult {
+  items: QuoteItem[];
+  warnings: string[];
+}
+
+/**
+ * Parse pasted quote text.
+ *
+ * Runs the same legacy strategies as before — but its output now goes through the same
+ * part-number validation as the PDF path. It had none, which meant the exact strategies that
+ * returned "25 LBS" and "SUMMARY OF CHARGES" as part numbers on a PDF could still do it here.
+ * Pasted text is inferred, not declared, so the family requirement applies in full.
+ */
+export const parseTextData = (text: string): ItemParseResult => {
   const lines = text.split('\n').map((l, i) => ({ y: i * 20, text: l }));
   let result = parseRingPowerPage(lines);
   if (result.items.length === 0) result = parseFallback(lines);
   if (result.items.length === 0) result = parseFuzzy(lines);
-  return result.items;
+
+  const validated = validateItems(result.items, { requireFamilyMatch: true });
+  if (!validated.accepted.length && validated.rejected.length) {
+    throw new Error(
+      `None of the ${validated.rejected.length} candidate line item(s) carried a recognisable part number: ` +
+        validated.rejected.slice(0, 5).map((r) => `"${r.value}" (${r.reason})`).join(', ') +
+        '. Check that the pasted text includes part numbers.',
+    );
+  }
+  return { items: validated.accepted, warnings: validated.warnings };
 };
 
-export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
+/**
+ * Parse a CSV or spreadsheet.
+ *
+ * The part number here is declared — the user put it in a column named for it — so the family
+ * requirement is relaxed and a mismatch is reported rather than dropped, which keeps aftermarket
+ * SKUs importable. The shape vetoes still apply, so a weight or a currency value in that column
+ * is still refused.
+ */
+export const parseExcelFile = async (file: File): Promise<ItemParseResult> => {
   const jsonData = await readSpreadsheetRows(file);
-  return jsonData.map((row: any) => {
+  const rows: QuoteItem[] = jsonData.map((row: any) => {
     const unitPrice = Number(row.unitPrice || row.Price || row['Unit Price'] || 0);
     const weight = Number(row.weight || row.Weight || 0);
     return {
@@ -831,6 +862,15 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
       originalImages: []
     };
   }).filter((item: QuoteItem) => item.partNo && item.partNo.length > 3 && !isDateString(item.partNo));
+
+  const validated = validateItems(rows, { requireFamilyMatch: false });
+  if (!validated.accepted.length && validated.rejected.length) {
+    throw new Error(
+      `None of the ${validated.rejected.length} row(s) carried a usable part number: ` +
+        validated.rejected.slice(0, 5).map((r) => `"${r.value}" (${r.reason})`).join(', ') + '.',
+    );
+  }
+  return { items: validated.accepted, warnings: validated.warnings };
 };
 
 // --- PDF entry point -----------------------------------------------------------------------

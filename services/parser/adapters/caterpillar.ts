@@ -19,10 +19,9 @@ export const caterpillarAdapter: Adapter = {
     return Math.min(1, score);
   },
   hints: {
-    families: [
-      // Reman and classic Caterpillar prefixes, e.g. 10R-7672, 1R-0750.
-      { name: 'cat-reman', pattern: /^\d{1,2}[A-Z]-\d{4}$/ },
-    ],
+    // No extra families: the shapes Caterpillar uses (539-0546, 10R-7672) are already in the
+    // verified default set, and an adapter-supplied duplicate of `cat-alpha` only made the
+    // family list longer to no effect.
     noisePatterns: [
       /^non-?returnable\s+part\b/i,
       /^remanufactured\s+part\b/i,

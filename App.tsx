@@ -1247,6 +1247,12 @@ const App: React.FC = () => {
               shippingCountry: (archivedClient as any).shippingCountry || (archivedConfig as any).shippingCountry || 'United States',
             };
             setItems(archivedItems.map((item: QuoteItem) => ({...item, aiImageUrl: undefined})));
+            // Carry the mismatch acknowledgement back in, and drop it if the file did not have
+            // one. Without this a round trip through the JSON file re-prompted every time; the
+            // draft status itself is always recomputed from the items, so a blank part number
+            // cannot be laundered by editing the file.
+            setReconciliationAck(data.reconciliationAck ?? null);
+            setReconciliationFigures(null);
             setClient(migratedClient);
             setConfig(archivedConfig);
             setAiAnalysis(aiAnalysis || null);

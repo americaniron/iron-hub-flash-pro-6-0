@@ -37,6 +37,20 @@ export interface ValidateOptions {
    * a wrong one is not, and only the second is what this guard exists to stop.
    */
   allowBlankPartNumbers?: boolean;
+  /**
+   * Whether a part number must match a known family.
+   *
+   * True for anything *inferred* from a document's layout or prose — a PDF or a pasted quote —
+   * because there the parser guessed which text was a part number and guessing wrong is the
+   * whole failure mode this guard exists for.
+   *
+   * False for anything *declared*, i.e. a spreadsheet column the user mapped and labelled as the
+   * part number. Aftermarket catalogues use shapes no Caterpillar family matches (P551670,
+   * FG-1234-A), and rejecting those would break a working import to defend against a mistake the
+   * user did not make. The shape vetoes below still apply either way, so a weight or a heading in
+   * that column is still refused; only the family requirement relaxes.
+   */
+  requireFamilyMatch?: boolean;
 }
 
 export function validateItems<T extends ValidatableItem>(
@@ -62,6 +76,14 @@ export function validateItems<T extends ValidatableItem>(
 
     const verdict = classifyPartNumber(raw, { families: options.families, headings: options.headings });
     if (!verdict.ok) {
+      // A family mismatch on a declared part number is reported, not fatal; every other reason
+      // (a unit, a currency symbol, prose, a section heading) rejects the item regardless.
+      const familyOnly = verdict.reason === 'matches no known part-number family';
+      if (options.requireFamilyMatch === false && familyOnly) {
+        warnings.push(`"${raw}" does not match a known part-number family; imported as given.`);
+        accepted.push({ ...item, partNo: raw.trim() });
+        continue;
+      }
       rejected.push({ value: raw, reason: verdict.reason ?? 'unknown' });
       continue;
     }

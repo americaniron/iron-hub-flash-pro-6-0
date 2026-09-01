@@ -68,7 +68,14 @@ export function selectAdapter(
       best = adapter;
     }
   }
-  if (!best || bestScore < 0.2) return { adapter: null, score: bestScore, options: {} };
+  // The floor applies to brand adapters only. `generic` is the deliberate catch-all and scores
+  // below it by design; excluding it here meant it could never be selected at all, which made it
+  // dead code rather than a fallback. Selecting it is a no-op either way — it carries no hints —
+  // but the reported adapter name is now honest about what ran.
+  if (!best || (bestScore < 0.2 && best.name !== 'generic')) {
+    const generic = registry.find((adapter) => adapter.name === 'generic') ?? null;
+    return { adapter: generic, score: generic ? 0.1 : bestScore, options: {} };
+  }
 
   const hints: AdapterHints = best.hints ?? {};
   return {
