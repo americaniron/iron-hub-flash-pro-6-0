@@ -34,6 +34,15 @@ if (!targets.length) {
   process.exit(2);
 }
 
+// pdf.js logs a standardFontDataUrl warning for every page it renders without bundled fonts.
+// It is harmless and it drowns out anything that actually matters, so it is filtered here.
+const realWarn = console.warn;
+console.warn = (...args) => {
+  const first = String(args[0] ?? '');
+  if (/standardFontDataUrl|Indexing all PDF objects/.test(first)) return;
+  realWarn(...args);
+};
+
 const { installIdentityCanvasShims, loadParserService, fileFromPath } = await import(
   pathToFileURL(path.join(repoRoot, 'test/support/harness.mjs')).href
 );
@@ -45,6 +54,11 @@ const pdfjsEntry = pathToFileURL(path.join(repoRoot, 'node_modules/pdfjs-dist/le
 
 /** Build the parser as it existed at `ref`, straight from git. */
 async function loadParserAtRef(gitRef) {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', `${gitRef}^{commit}`], { cwd: repoRoot, stdio: 'ignore' });
+  } catch {
+    die(`unknown git ref "${gitRef}". The default baseline is the rollback tag ${DEFAULT_REF}.`);
+  }
   const source = execFileSync('git', ['show', `${gitRef}:services/parserService.ts`], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -64,18 +78,38 @@ async function loadParserAtRef(gitRef) {
   return import(pathToFileURL(out).href);
 }
 
+/** Fail with a readable message on stderr and a non-zero exit, never a raw stack trace. */
+function die(message) {
+  console.error(`compare-parsers: ${message}`);
+  process.exit(2);
+}
+
+/**
+ * Resolve the arguments to a list of PDFs.
+ *
+ * Every failure here used to be an unhandled statSync throw.  With stdout redirected to a file
+ * that produced a stack trace on screen and a zero-byte JSON file, which reads exactly like the
+ * parser failing on every document when in fact nothing had been parsed at all.
+ */
 function collectPdfs(entries) {
   const files = [];
   for (const entry of entries) {
-    const stat = fs.statSync(entry);
+    const resolved = path.resolve(entry.replace(/^~(?=$|\/)/, process.env.HOME ?? '~'));
+    if (!fs.existsSync(resolved)) {
+      die(`no such file or directory: ${entry}\n  Pass the real path to a PDF, or to a folder containing PDFs.`);
+    }
+    const stat = fs.statSync(resolved);
     if (stat.isDirectory()) {
-      for (const name of fs.readdirSync(entry).sort()) {
-        if (name.toLowerCase().endsWith('.pdf')) files.push(path.join(entry, name));
-      }
+      const pdfs = fs.readdirSync(resolved).filter((n) => n.toLowerCase().endsWith('.pdf')).sort();
+      if (!pdfs.length) die(`no .pdf files in ${entry}`);
+      for (const name of pdfs) files.push(path.join(resolved, name));
+    } else if (!resolved.toLowerCase().endsWith('.pdf')) {
+      die(`not a PDF: ${entry}`);
     } else {
-      files.push(entry);
+      files.push(resolved);
     }
   }
+  if (!files.length) die('nothing to compare');
   return files;
 }
 
@@ -115,6 +149,7 @@ for (const file of collectPdfs(targets)) {
 
 if (asJson) {
   console.log(JSON.stringify(report, null, 2));
+  console.error(`compare-parsers: wrote ${report.length} result(s) to stdout.`);
 } else {
   for (const entry of report) {
     console.log(`\n=== ${path.basename(entry.file)} ===`);
