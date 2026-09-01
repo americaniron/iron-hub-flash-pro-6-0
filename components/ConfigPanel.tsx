@@ -153,6 +153,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [status, setStatus] = useState("Idle");
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
+  // Parser caveats — a redacted price, an unreconciled discount, a line with no part number.
+  // Shown alongside a successful import because the import succeeding is exactly when nobody
+  // would otherwise look.
+  const [statusNotices, setStatusNotices] = useState<string[]>([]);
   const [showAddressBook, setShowAddressBook] = useState(false);
   const [bookSearch, setBookSearch] = useState("");
   const [useThinking, setUseThinking] = useState(false);
@@ -309,15 +313,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
     setStatus("Processing");
     setStatusError(null);
     setStatusSuccess(null);
+    setStatusNotices([]);
     try {
         let items: QuoteItem[] = [];
+        let notices: string[] = [];
         if (activeTab === ParseMode.PASTE) {
             if (!textInput.trim()) throw new Error('Paste quote line items before processing the manifest.');
             items = parseTextData(textInput);
         } else if (activeTab === ParseMode.PDF) {
             const pdfFile = file || pdfInputRef.current?.files?.[0];
             if (!pdfFile) throw new Error('Choose a Caterpillar or supplier PDF before processing the manifest.');
-            ({ items } = await parsePdfFile(pdfFile));
+            const parsed = await parsePdfFile(pdfFile);
+            items = parsed.items;
+            notices = parsed.warnings;
         } else if (activeTab === ParseMode.EXCEL) {
             const excelFile = file || excelInputRef.current?.files?.[0];
             if (!excelFile) throw new Error('Choose a CSV or Excel file before processing the manifest.');
@@ -326,6 +334,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         if (items.length === 0) throw new Error('No line items were detected. Confirm that the source contains item quantities and part numbers, then retry.');
         publishQuoteImport(props.currentUser, items);
         setStatusSuccess(`${items.length} line item${items.length === 1 ? '' : 's'} imported into the quote.`);
+        setStatusNotices(notices);
         setStatus("Complete");
     } catch (err) {
         setStatus("Error");
@@ -336,6 +345,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         setTimeout(() => {
           setStatus("Idle");
           setStatusSuccess(null);
+          // Notices are deliberately not cleared with the success banner: a discount that does
+          // not reconcile needs to still be on screen when the user comes back to the quote.
         }, 5000);
     }
   };
@@ -522,6 +533,16 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
               <p role="status" className="mt-3 text-[10px] font-bold leading-relaxed text-emerald-700">
                 {statusSuccess}
               </p>
+            )}
+            {statusNotices.length > 0 && (
+              <div role="status" className="mt-3 space-y-1 border-l-2 border-amber-400 pl-2">
+                <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Check before quoting</p>
+                {statusNotices.map((notice, index) => (
+                  <p key={index} className="text-[10px] font-bold leading-relaxed text-amber-700">
+                    {notice}
+                  </p>
+                ))}
+              </div>
             )}
           </div>
 

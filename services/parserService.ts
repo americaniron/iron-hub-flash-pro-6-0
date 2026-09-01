@@ -2,6 +2,11 @@
 import { QuoteItem, ClientInfo } from '../types.ts';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import { readSpreadsheetRows } from './spreadsheetService.ts';
+import { PageModel, TextItem } from './parser/geometry.ts';
+import { CoreItem, extractItems } from './parser/core.ts';
+import { DocumentSummary, extractDocumentSummary } from './parser/documentSummary.ts';
+import { selectAdapter } from './parser/adapters/index.ts';
+import { describeEmptyResult, validateItems } from './parser/validate.ts';
 
 // --- Helper Functions ---
 
@@ -241,6 +246,13 @@ function processItemLine(item: QuoteItem, lineText: string): void {
  * Ring Power specific line-item parser refined for accuracy and multi-line resilience.
  * Supports continuation flag for multi-page documents.
  */
+/**
+ * Ring Power line-oriented parser.
+ *
+ * Unexercised by every fixture in `fixtures/quotes` — but that is a statement about this disk,
+ * not about production, and a real Ring Power quote would still reach it through the fallback
+ * chain.  Kept and registered for that reason; see LEGACY_STRATEGIES.
+ */
 function parseRingPowerPage(textLines: {y: number, text: string}[], isContinuation: boolean = false): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
   const yCoords: number[] = [];
@@ -371,7 +383,10 @@ function parseRingPowerPage(textLines: {y: number, text: string}[], isContinuati
 
 
 /**
- * John Deere specific line-item parser.
+ * John Deere / Dobbs Equipment line-item parser.
+ *
+ * Unexercised by the fixtures on this disk, kept for the same reason as parseRingPowerPage: a
+ * real Dobbs quote from a customer would still land here.
  */
 function parseJohnDeerePage(textLines: {y: number, text: string, x?: number}[]): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
@@ -649,6 +664,21 @@ interface RawTextItem {
   height: number;
 }
 
+/**
+ * Legacy coordinate-assisted table parser.
+ *
+ * NOT deprecated and NOT dead: it is still registered as a fallback because no fixture on this
+ * disk proves what production sends.  It is, however, known to produce false positives, and the
+ * evidence is specific — run against `fixtures/quotes/cat-partscatcom-boyd-2026-08.pdf` it
+ * returns six "items" (ONLINE25, a promotion blurb, Payment Information, BILLING METHOD,
+ * Billing Address, SUMMARY OF CHARGES), and against the round-trip quote it returns seven, of
+ * which the part numbers are weights.  Both are asserted in test/parser-fixtures.test.mjs.
+ *
+ * Two things now contain that: the geometry core runs first and wins any disagreement, and
+ * whatever this returns still has to pass `validateItems` before it can reach a QuoteItem.
+ * It requires the literal token "part" in the header row, which is why it found nothing at all
+ * on the Parts.Cat.Com layout — that header reads Item / Quantity / Product Description.
+ */
 function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
   const yCoords: number[] = [];
@@ -802,265 +832,466 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
   }).filter((item: QuoteItem) => item.partNo && item.partNo.length > 3 && !isDateString(item.partNo));
 };
 
-export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], clientInfo: Partial<ClientInfo>}> => {
-  if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('PDF files must be between 1 byte and 10 MB.');
+// --- PDF entry point -----------------------------------------------------------------------
+
+/**
+ * Result of parsing a supplier PDF.
+ *
+ * `items` and `clientInfo` are unchanged from the previous contract, so the Intake Center and
+ * everything downstream of it keep working untouched.  The rest is additive.
+ */
+export interface PdfParseResult {
+  items: QuoteItem[];
+  clientInfo: Partial<ClientInfo>;
+  /** Order-level totals and header fields.  Totals are reported as printed, never recomputed. */
+  summary: DocumentSummary;
+  /** Everything the parser was unsure about, in the order it became unsure. */
+  warnings: string[];
+  /** Which strategy produced `items` — "geometry-core+caterpillar", "legacy:ring-power", ... */
+  strategy: string;
+}
+
+/** One page's worth of input for the legacy line-oriented strategies. */
+interface LegacyPageInput {
+  pageNumber: number;
+  textLines: { y: number; text: string }[];
+  rawItems: RawTextItem[];
+  pageText: string;
+}
+
+/**
+ * The pre-geometry strategies, kept and registered rather than replaced.
+ *
+ * None of them fires on any fixture in `fixtures/quotes`, but absence from this disk is not
+ * absence from production: a Ring Power or Dobbs/Deere quote from a real customer would still
+ * land on them, and deleting them would break that silently.  They now run only when the
+ * geometry core comes up empty, and their output goes through the same part-number validation,
+ * which is what stops them re-introducing the garbage they used to emit.
+ */
+interface LegacyStrategy {
+  name: string;
+  /** True when this strategy claims the document (brand sniffing, as before). */
+  claims(input: LegacyPageInput, state: LegacyState): boolean;
+  run(input: LegacyPageInput, state: LegacyState): { items: QuoteItem[]; yCoords: number[] };
+}
+
+interface LegacyState {
+  isRingDocument: boolean;
+  isJohnDeereDocument: boolean;
+}
+
+const LEGACY_STRATEGIES: LegacyStrategy[] = [
+  {
+    name: 'ring-power',
+    claims: (_input, state) => state.isRingDocument,
+    run: (input, _state) => parseRingPowerPage(input.textLines, input.pageNumber > 1),
+  },
+  {
+    name: 'john-deere',
+    claims: (_input, state) => state.isJohnDeereDocument,
+    run: (input) => parseJohnDeerePage(input.textLines),
+  },
+  {
+    name: 'table-based',
+    claims: () => true,
+    run: (input) => parseTableBasedPage(input.rawItems),
+  },
+  {
+    name: 'fallback',
+    claims: () => true,
+    run: (input) => parseFallback(input.textLines),
+  },
+  {
+    name: 'fuzzy',
+    claims: () => true,
+    run: (input) => parseFuzzy(input.textLines),
+  },
+];
+
+/** Map a geometry-core item onto the QuoteItem contract, adding only optional fields. */
+function toQuoteItem(item: CoreItem): QuoteItem {
+  return {
+    lineNo: item.lineNo,
+    qty: item.qty,
+    partNo: item.partNo,
+    desc: item.desc,
+    weight: item.weight,
+    unitPrice: item.unitPrice,
+    coreDeposit: item.coreDeposit,
+    availability: item.availability,
+    notes: item.notes,
+    originalImages: [],
+    extendedPrice: item.extendedPrice,
+    currency: item.currency,
+    leadTime: item.leadTime,
+    warnings: item.warnings.length ? item.warnings : undefined,
+    confidence: item.confidence,
+    rawLines: item.rawLines,
+  };
+}
+
+/**
+ * Image extraction, unchanged in behaviour and moved into its own function so the page loop
+ * stays readable.  Best effort throughout: a PDF whose images cannot be decoded must still
+ * yield its line items.
+ */
+async function extractPageImages(
+  page: any,
+  pdfjs: any,
+): Promise<{ y: number; x: number; dataUrl: string; width: number; height: number }[]> {
+  const images: { y: number; x: number; dataUrl: string; width: number; height: number }[] = [];
+
+  const resolvePageImage = (imageKey: string): Promise<any | null> =>
+    new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: any) => {
+        if (settled) return;
+        settled = true;
+        resolve(value || null);
+      };
+      const timer = window.setTimeout(() => finish(null), 3_000);
+      try {
+        const callbackResult = page.objs.get(imageKey, (value: any) => {
+          window.clearTimeout(timer);
+          finish(value);
+        });
+        if (callbackResult && typeof callbackResult.then === 'function') {
+          callbackResult
+            .then((value: any) => {
+              window.clearTimeout(timer);
+              finish(value);
+            })
+            .catch(() => {
+              window.clearTimeout(timer);
+              finish(null);
+            });
+        } else if (callbackResult && typeof callbackResult === 'object') {
+          window.clearTimeout(timer);
+          finish(callbackResult);
+        }
+      } catch {
+        window.clearTimeout(timer);
+        finish(null);
+      }
+    });
+
+  const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
+    const transformStack: any[] = [];
+    let currentTransform = [...initialTransform];
+
+    for (let i = 0; i < fnArray.length; i++) {
+      // Yield to the main thread periodically so a large PDF does not freeze the UI.
+      if (i % 5000 === 0 && i > 0) await new Promise((r) => setTimeout(r, 0));
+
+      const fn = fnArray[i];
+      const args = argsArray[i];
+
+      if (fn === pdfjs.OPS.save) {
+        transformStack.push([...currentTransform]);
+      } else if (fn === pdfjs.OPS.restore) {
+        currentTransform = transformStack.pop() || [1, 0, 0, 1, 0, 0];
+      } else if (fn === pdfjs.OPS.transform) {
+        currentTransform = pdfjs.Util.transform(currentTransform, args);
+      } else if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject) {
+        try {
+          let imgData: any = null;
+          if (fn === pdfjs.OPS.paintImageXObject) {
+            imgData = await resolvePageImage(args[0]);
+          } else {
+            imgData = args[0];
+          }
+
+          if (imgData) {
+            const width = imgData.width || (imgData.bitmap && imgData.bitmap.width) || imgData.naturalWidth;
+            const height = imgData.height || (imgData.bitmap && imgData.bitmap.height) || imgData.naturalHeight;
+            if (!width || !height || width < 20 || height < 20) continue;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              if (imgData.bitmap) {
+                ctx.drawImage(imgData.bitmap, 0, 0);
+              } else if (imgData.data) {
+                const imageData = ctx.createImageData(width, height);
+                const data = imgData.data;
+                const pixels = imageData.data;
+                if (data.length === width * height * 3) {
+                  for (let p = 0, q = 0; p < data.length; p += 3, q += 4) {
+                    pixels[q] = data[p];
+                    pixels[q + 1] = data[p + 1];
+                    pixels[q + 2] = data[p + 2];
+                    pixels[q + 3] = 255;
+                  }
+                } else if (data.length === width * height * 4) {
+                  pixels.set(data);
+                } else if (data.length === width * height) {
+                  for (let p = 0, q = 0; p < data.length; p++, q += 4) {
+                    pixels[q] = pixels[q + 1] = pixels[q + 2] = data[p];
+                    pixels[q + 3] = 255;
+                  }
+                }
+                ctx.putImageData(imageData, 0, 0);
+              } else if (
+                imgData instanceof HTMLImageElement ||
+                imgData instanceof HTMLCanvasElement ||
+                imgData instanceof ImageBitmap
+              ) {
+                ctx.drawImage(imgData, 0, 0);
+              }
+              images.push({
+                y: currentTransform[5],
+                x: currentTransform[4],
+                width,
+                height,
+                dataUrl: canvas.toDataURL('image/jpeg', 0.8),
+              });
+            }
+          }
+        } catch {
+          // Text extraction still succeeds when a PDF image cannot be decoded.
+        }
+      }
+    }
+  };
+
+  let imageExtractionTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const imageExtraction = (async () => {
+      const operatorList = await page.getOperatorList();
+      await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
+    })();
+    const timeout = new Promise<never>((_, reject) => {
+      imageExtractionTimeout = setTimeout(() => reject(new Error('PDF image extraction timed out.')), 20_000);
+    });
+    await Promise.race([imageExtraction, timeout]);
+  } catch {
+    // Image extraction is best effort and must not block quote extraction.
+  } finally {
+    if (imageExtractionTimeout) clearTimeout(imageExtractionTimeout);
+  }
+
+  return images;
+}
+
+/**
+ * Parse a supplier PDF into line items.
+ *
+ * Order of operations: read every page's words with their coordinates, ask the geometry core for
+ * items, and only if it finds none fall through to the legacy per-brand strategies.  Whatever
+ * produces the items, they pass the same part-number validation before being returned, and if
+ * nothing survives the caller gets a diagnosis naming the stage that came up short rather than
+ * the old "No items detected in source."
+ */
+export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
+  if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
+    throw new Error('PDF files must be between 1 byte and 10 MB.');
+  }
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   // The Suite proxy rewrites this emitted /assets URL into /hub-proxy/assets.
   // Keeping the client value untouched prevents a second proxy prefix after
   // Vite folds this imported URL into the production bundle.
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-  
-  let fullItems: QuoteItem[] = [];
-  let clientInfo: Partial<ClientInfo> = {};
-  
-  // State persistence across pages
-  let isRingDocument = false;
-  let isJohnDeereDocument = false;
-  
+
+  let pdf: any;
+  try {
+    pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  } catch (error: any) {
+    const name = String(error?.name || '');
+    if (/Password/i.test(name) || /password/i.test(String(error?.message || ''))) {
+      throw new Error('This PDF is password protected. Remove the password and upload it again.');
+    }
+    throw new Error('This file could not be opened as a PDF. Confirm it is not corrupt, then retry.');
+  }
+
+  const warnings: string[] = [];
+  const pages: PageModel[] = [];
+  const legacyPages: LegacyPageInput[] = [];
+  const imagesByPage = new Map<number, { y: number; x: number; dataUrl: string; width: number; height: number }[]>();
+  const legacyState: LegacyState = { isRingDocument: false, isJohnDeereDocument: false };
+
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1 });
     const textContent = await page.getTextContent();
+
+    // Geometry model: coordinates preserved, normalised against the page box so Letter, A4 and
+    // Legal all behave the same.
+    const items: TextItem[] = [];
+    for (const item of textContent.items as any[]) {
+      if (typeof item?.str !== 'string') continue;
+      const transform = item.transform || [1, 0, 0, 1, 0, 0];
+      const fontSize = Math.hypot(transform[0], transform[1]) || item.height || 9;
+      const baselineFromTop = viewport.height - transform[5];
+      items.push({
+        text: item.str,
+        x0: transform[4],
+        x1: transform[4] + (item.width || 0),
+        top: baselineFromTop - (item.height || fontSize),
+        bottom: baselineFromTop,
+        fontSize,
+        fontName: item.fontName,
+      });
+    }
+    pages.push({ pageNumber: pageNum, width: viewport.width, height: viewport.height, items });
+
+    // Legacy model: the flattened line view the pre-geometry strategies were written against.
     const linesMap = new Map<number, any[]>();
-    
-    textContent.items.forEach((item: any) => {
+    (textContent.items as any[]).forEach((item: any) => {
+      if (typeof item?.str !== 'string') return;
       const y = Math.round(item.transform[5]);
       let matchY: number | undefined;
-      for (const key of linesMap.keys()) { 
-        if (Math.abs(key - y) <= 8) { matchY = key; break; } 
+      for (const key of linesMap.keys()) {
+        if (Math.abs(key - y) <= 8) {
+          matchY = key;
+          break;
+        }
       }
-      if (matchY === undefined) { 
-        matchY = y; 
-        linesMap.set(matchY, []); 
+      if (matchY === undefined) {
+        matchY = y;
+        linesMap.set(matchY, []);
       }
       linesMap.get(matchY)!.push(item);
     });
-
     const sortedY = Array.from(linesMap.keys()).sort((a, b) => b - a);
-    const textLines = sortedY.map(y => ({
-      y,
-      text: linesMap.get(y)!.sort((a, b) => a.transform[4] - b.transform[4]).map(it => it.str).join(' ').trim()
-    })).filter(l => l.text.length > 0);
+    const textLines = sortedY
+      .map((y) => ({
+        y,
+        text: linesMap
+          .get(y)!
+          .sort((a, b) => a.transform[4] - b.transform[4])
+          .map((it) => it.str)
+          .join(' ')
+          .trim(),
+      }))
+      .filter((l) => l.text.length > 0);
+    const rawItems: RawTextItem[] = (textContent.items as any[])
+      .filter((item: any) => typeof item?.str === 'string')
+      .map((item: any) => ({
+        text: item.str,
+        x: item.transform[4],
+        y: item.transform[5],
+        width: item.width,
+        height: item.height,
+      }))
+      .filter((it: any) => it.text.trim().length > 0);
+    const pageText = textLines.map((l) => l.text).join(' ');
 
-    const rawItems: RawTextItem[] = textContent.items.map((item: any) => ({
-      text: item.str,
-      x: item.transform[4],
-      y: item.transform[5],
-      width: item.width,
-      height: item.height
-    })).filter((it: any) => it.text.trim().length > 0);
+    if (/Ring Power|RING POWER CORPORATION/i.test(pageText)) legacyState.isRingDocument = true;
+    if (/John Deere|Dobbs Equipment/i.test(pageText)) legacyState.isJohnDeereDocument = true;
 
-    const pageText = textLines.map(l => l.text).join(' ');
-    
-    // Identity check on every page to ensure state is maintained
-    if (/Ring Power|RING POWER CORPORATION/i.test(pageText)) {
-        isRingDocument = true;
+    legacyPages.push({ pageNumber: pageNum, textLines, rawItems, pageText });
+    imagesByPage.set(pageNum, await extractPageImages(page, pdfjs));
+  }
+
+  const summary = extractDocumentSummary(pages);
+  warnings.push(...summary.warnings);
+  const clientInfo: Partial<ClientInfo> = legacyPages.length ? extractClientInfo(legacyPages[0].textLines) : {};
+
+  const selection = selectAdapter(pages);
+  const coreResult = extractItems(pages, selection.options);
+  const coreValidated = validateItems(coreResult.items, {
+    families: selection.options.families,
+    allowBlankPartNumbers: true,
+  });
+  warnings.push(...coreValidated.warnings);
+
+  let items: QuoteItem[] = coreValidated.accepted.map(toQuoteItem);
+  let coreItems: CoreItem[] = coreValidated.accepted;
+  let strategy = items.length
+    ? `geometry-core${selection.adapter && selection.adapter.name !== 'generic' ? `+${selection.adapter.name}` : ''}`
+    : '';
+
+  // Legacy strategies always run, but only to be compared against.  The core wins any
+  // disagreement; the disagreement itself is recorded so a regression in either is visible.
+  const legacyResults = runLegacyStrategies(legacyPages, legacyState);
+  if (items.length) {
+    for (const result of legacyResults) {
+      if (result.items.length && result.items.length !== items.length) {
+        warnings.push(
+          `Legacy strategy "${result.name}" found ${result.items.length} item(s) where the layout engine found ${items.length}; the layout engine's result was used.`,
+        );
+      }
     }
-    if (/John Deere|Dobbs Equipment/i.test(pageText)) {
-        isJohnDeereDocument = true;
+  } else {
+    for (const result of legacyResults) {
+      const validated = validateItems(result.items, { families: selection.options.families });
+      warnings.push(...validated.warnings);
+      if (validated.accepted.length) {
+        items = validated.accepted;
+        coreItems = [];
+        strategy = `legacy:${result.name}`;
+        warnings.push(`The layout engine found no items; fell back to the legacy "${result.name}" strategy.`);
+        break;
+      }
     }
+  }
 
-    if (pageNum === 1) {
-        clientInfo = extractClientInfo(textLines);
-    }
+  if (!items.length) {
+    const failure = coreResult.failure;
+    const detail = failure?.message ?? 'No line items could be read from this document.';
+    const rejected = [...coreResult.rejected, ...coreValidated.rejected];
+    const rejectedNote = rejected.length
+      ? ` ${rejected.length} candidate(s) were rejected: ${rejected
+          .slice(0, 5)
+          .map((r) => `"${r.value}" (${r.reason})`)
+          .join(', ')}.`
+      : '';
+    throw new Error(
+      describeEmptyResult(failure?.kind ?? 'no-header', detail + rejectedNote, failure?.textPreview ?? ''),
+    );
+  }
 
-    let pageItems: QuoteItem[] = [];
-    let yCoords: number[] = [];
-
-    // Prioritize specialized parser if document type is known
-    if (isRingDocument) {
-        const result = parseRingPowerPage(textLines, pageNum > 1);
-        pageItems = result.items;
-        yCoords = result.yCoords;
-    } else if (isJohnDeereDocument) {
-        const result = parseJohnDeerePage(textLines);
-        pageItems = result.items;
-        yCoords = result.yCoords;
-    } else {
-        const tableResult = parseTableBasedPage(rawItems);
-        if (tableResult.items.length > 0) {
-            pageItems = tableResult.items;
-            yCoords = tableResult.yCoords;
-        }
-    }
-    
-    // Fallbacks if specialized parser didn't catch items or if it's an unknown document type
-    if (pageItems.length === 0) {
-        const fbResult = parseFallback(textLines);
-        pageItems = fbResult.items;
-        yCoords = fbResult.yCoords;
-        
-        if (pageItems.length === 0) {
-           const fuzzyResult = parseFuzzy(textLines);
-           pageItems = fuzzyResult.items;
-           yCoords = fuzzyResult.yCoords;
-        }
-    }
-
-    // --- Image Extraction Logic ---
-    const images: { y: number, x: number, dataUrl: string, width: number, height: number }[] = [];
-    
-    const resolvePageImage = (imageKey: string): Promise<any | null> => new Promise((resolve) => {
-        let settled = false;
-        const finish = (value: any) => {
-            if (settled) return;
-            settled = true;
-            resolve(value || null);
-        };
-        const timer = window.setTimeout(() => finish(null), 3_000);
-        try {
-            const callbackResult = page.objs.get(imageKey, (value: any) => {
-                window.clearTimeout(timer);
-                finish(value);
-            });
-            if (callbackResult && typeof callbackResult.then === 'function') {
-                callbackResult.then((value: any) => {
-                    window.clearTimeout(timer);
-                    finish(value);
-                }).catch(() => {
-                    window.clearTimeout(timer);
-                    finish(null);
-                });
-            } else if (callbackResult && typeof callbackResult === 'object') {
-                window.clearTimeout(timer);
-                finish(callbackResult);
-            }
-        } catch {
-            window.clearTimeout(timer);
-            finish(null);
-        }
-    });
-
-    const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
-        const transformStack: any[] = [];
-        let currentTransform = [...initialTransform];
-
-        for (let i = 0; i < fnArray.length; i++) {
-            // Yield to main thread every 5000 operations to prevent UI freeze
-            if (i % 5000 === 0 && i > 0) {
-                await new Promise(r => setTimeout(r, 0));
-            }
-            
-            const fn = fnArray[i];
-            const args = argsArray[i];
-
-            if (fn === pdfjs.OPS.save) {
-                transformStack.push([...currentTransform]);
-            } else if (fn === pdfjs.OPS.restore) {
-                currentTransform = transformStack.pop() || [1, 0, 0, 1, 0, 0];
-            } else if (fn === pdfjs.OPS.transform) {
-                currentTransform = pdfjs.Util.transform(currentTransform, args);
-            } else if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject) {
-                try {
-                    let imgData: any = null;
-                    if (fn === pdfjs.OPS.paintImageXObject) {
-                        const imgKey = args[0];
-                        imgData = await resolvePageImage(imgKey);
-                    } else {
-                        imgData = args[0];
-                    }
-                    
-                    if (imgData) {
-                        const width = imgData.width || (imgData.bitmap && imgData.bitmap.width) || imgData.naturalWidth;
-                        const height = imgData.height || (imgData.bitmap && imgData.bitmap.height) || imgData.naturalHeight;
-                        
-                        // Filter out tiny images (likely icons or spacers)
-                        if (!width || !height || width < 20 || height < 20) continue;
-
-                        const canvas = document.createElement("canvas");
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext("2d");
-                        if (ctx) {
-                            if (imgData.bitmap) {
-                                ctx.drawImage(imgData.bitmap, 0, 0);
-                            } else if (imgData.data) {
-                                const imageData = ctx.createImageData(width, height);
-                                const data = imgData.data;
-                                const pixels = imageData.data;
-                                
-                                if (data.length === width * height * 3) {
-                                    for (let p = 0, q = 0; p < data.length; p += 3, q += 4) {
-                                        pixels[q] = data[p]; pixels[q+1] = data[p+1]; pixels[q+2] = data[p+2]; pixels[q+3] = 255;
-                                    }
-                                } else if (data.length === width * height * 4) {
-                                    pixels.set(data);
-                                } else if (data.length === width * height) {
-                                    for (let p = 0, q = 0; p < data.length; p++, q += 4) {
-                                        pixels[q] = pixels[q+1] = pixels[q+2] = data[p]; pixels[q+3] = 255;
-                                    }
-                                }
-                                ctx.putImageData(imageData, 0, 0);
-                            } else if (imgData instanceof HTMLImageElement || imgData instanceof HTMLCanvasElement || imgData instanceof ImageBitmap) {
-                                ctx.drawImage(imgData, 0, 0);
-                            }
-                            images.push({ 
-                                y: currentTransform[5], 
-                                x: currentTransform[4],
-                                width: width,
-                                height: height,
-                                dataUrl: canvas.toDataURL("image/jpeg", 0.8) 
-                            });
-                        }
-                    }
-                } catch {
-                    // Text extraction still succeeds when a PDF image cannot be decoded.
-                }
-            }
-        }
-    };
-
-    let imageExtractionTimeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-        const imageExtraction = (async () => {
-          const operatorList = await page.getOperatorList();
-          await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
-        })();
-        const timeout = new Promise<never>((_, reject) => {
-          imageExtractionTimeout = setTimeout(() => reject(new Error('PDF image extraction timed out.')), 20_000);
-        });
-        await Promise.race([imageExtraction, timeout]);
-    } catch {
-        // PDF image extraction is best-effort and must not block quote extraction.
-    } finally {
-        if (imageExtractionTimeout) clearTimeout(imageExtractionTimeout);
-    }
-
-    // Associate extracted images with items on this page
-    // Robust matching: Find the image closest to the item's Y coordinate
-    const availableImages = [...images];
-    pageItems.forEach((item, idx) => {
-      const itemY = yCoords[idx];
-      let bestImgIdx = -1;
-      let minDiff = Infinity;
-      
-      availableImages.forEach((img, i) => {
-        const diff = Math.abs(img.y - itemY);
-        // Keep logos/footer images away from parts by requiring a nearby row.
-        if (diff < minDiff && diff < 300) {
-          minDiff = diff; 
-          bestImgIdx = i; 
-        }
-      });
-      
-      if (bestImgIdx !== -1) {
-          item.originalImages = [availableImages[bestImgIdx].dataUrl];
-          availableImages.splice(bestImgIdx, 1);
+  // Pair each item with the nearest image on its own page.  Coordinates from the operator list
+  // are bottom-origin, so the anchor is converted back before comparing.
+  for (let index = 0; index < items.length; index++) {
+    const source = coreItems[index];
+    if (!source) break;
+    const pageModel = pages.find((p) => p.pageNumber === source.pageNumber);
+    const available = imagesByPage.get(source.pageNumber);
+    if (!pageModel || !available || !available.length) continue;
+    const anchorFromBottom = pageModel.height - source.anchorY;
+    let bestIndex = -1;
+    let minDiff = Infinity;
+    available.forEach((image, i) => {
+      const diff = Math.abs(image.y - anchorFromBottom);
+      // Keep logos and footer art away from parts by requiring a nearby row.
+      if (diff < minDiff && diff < 300) {
+        minDiff = diff;
+        bestIndex = i;
       }
     });
-
-    fullItems.push(...pageItems);
+    if (bestIndex !== -1) {
+      items[index] = { ...items[index], originalImages: [available[bestIndex].dataUrl] };
+      available.splice(bestIndex, 1);
+    }
   }
 
-  fullItems = fullItems.map(item => ({
-    ...item,
-    desc: cleanDescription(item.desc)
-  }));
-
-  if (fullItems.length === 0) {
-    throw new Error("No items detected in source. Please check the document format.");
-  }
-
-  return { items: fullItems, clientInfo };
+  return { items, clientInfo, summary, warnings, strategy };
 };
+
+/** Run every legacy strategy over every page, collecting whatever each one claims to find. */
+function runLegacyStrategies(
+  legacyPages: readonly LegacyPageInput[],
+  state: LegacyState,
+): { name: string; items: QuoteItem[] }[] {
+  const results: { name: string; items: QuoteItem[] }[] = [];
+  for (const strategy of LEGACY_STRATEGIES) {
+    const collected: QuoteItem[] = [];
+    for (const input of legacyPages) {
+      if (!strategy.claims(input, state)) continue;
+      try {
+        collected.push(...strategy.run(input, state).items);
+      } catch {
+        // A legacy strategy throwing must never take the parse down; the core already ran.
+      }
+    }
+    results.push({
+      name: strategy.name,
+      items: collected.map((item) => ({ ...item, desc: cleanDescription(item.desc) })),
+    });
+  }
+  return results;
+}
