@@ -127,8 +127,20 @@ export const ItemEditor: React.FC<ItemEditorProps> = ({ items, config, onUpdate,
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6 flex-grow w-full">
                 <div className="md:col-span-3 space-y-1.5">
                   <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Serial/Part#</span>
+                  {/*
+                    A blank part number keeps the quote a draft and blocks every send, so it is
+                    marked here rather than only in a toast that disappears. The data attribute is
+                    how reopening a draft jumps straight to the field that needs fixing.
+                  */}
                   <input 
-                    className="w-full h-[40px] bg-white border border-slate-200 rounded-lg font-mono font-bold text-[13px] text-cat-black outline-none uppercase px-3 focus:ring-2 focus:ring-cat-yellow/30 focus:border-cat-yellow transition-all shadow-sm"
+                    data-partno-blank={!item.partNo.trim() ? 'true' : undefined}
+                    aria-invalid={!item.partNo.trim()}
+                    placeholder={!item.partNo.trim() ? 'REQUIRED' : undefined}
+                    className={`w-full h-[40px] bg-white border rounded-lg font-mono font-bold text-[13px] text-cat-black outline-none uppercase px-3 focus:ring-2 transition-all shadow-sm ${
+                      item.partNo.trim()
+                        ? 'border-slate-200 focus:ring-cat-yellow/30 focus:border-cat-yellow'
+                        : 'border-red-400 bg-red-50 focus:ring-red-300 focus:border-red-500 placeholder:text-red-400'
+                    }`}
                     value={item.partNo}
                     onChange={(e) => handleChange(idx, 'partNo', e.target.value)}
                   />

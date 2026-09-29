@@ -2,6 +2,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AppConfig, ClientInfo, ParseMode, QuoteItem, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus } from '../types.ts';
 import { parseTextData, parsePdfFile, parseExcelFile } from '../services/parserService.ts';
+import { isDraftQuote } from '../services/quoteReadiness.ts';
+import type { ReconciliationFigures } from '../services/quoteReadiness.ts';
 import { performIntelligentTask, transcribeAudio } from '../services/claudeService.ts';
 import { Logo } from './Logo.tsx';
 import { COUNTRY_OPTIONS, normalizeCountryCode } from '../services/countryOptions.ts';
@@ -153,6 +155,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
   const [status, setStatus] = useState("Idle");
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
+  // Parser caveats — a redacted price, an unreconciled discount, a line with no part number.
+  // Shown alongside a successful import because the import succeeding is exactly when nobody
+  // would otherwise look.
+  const [statusNotices, setStatusNotices] = useState<string[]>([]);
   const [showAddressBook, setShowAddressBook] = useState(false);
   const [bookSearch, setBookSearch] = useState("");
   const [useThinking, setUseThinking] = useState(false);
@@ -309,23 +315,40 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
     setStatus("Processing");
     setStatusError(null);
     setStatusSuccess(null);
+    setStatusNotices([]);
     try {
         let items: QuoteItem[] = [];
+        let notices: string[] = [];
+        let figures: ReconciliationFigures | undefined;
         if (activeTab === ParseMode.PASTE) {
             if (!textInput.trim()) throw new Error('Paste quote line items before processing the manifest.');
-            items = parseTextData(textInput);
+            const pasted = parseTextData(textInput);
+            items = pasted.items;
+            notices = pasted.warnings;
         } else if (activeTab === ParseMode.PDF) {
             const pdfFile = file || pdfInputRef.current?.files?.[0];
             if (!pdfFile) throw new Error('Choose a Caterpillar or supplier PDF before processing the manifest.');
-            ({ items } = await parsePdfFile(pdfFile));
+            const parsed = await parsePdfFile(pdfFile);
+            items = parsed.items;
+            notices = parsed.warnings;
+            figures = {
+              itemsTotal: parsed.reconciliation.itemsTotal,
+              subtotal: parsed.summary.subtotal,
+              shipping: parsed.summary.shipping,
+              tax: parsed.summary.tax,
+              total: parsed.summary.total,
+            };
         } else if (activeTab === ParseMode.EXCEL) {
             const excelFile = file || excelInputRef.current?.files?.[0];
             if (!excelFile) throw new Error('Choose a CSV or Excel file before processing the manifest.');
-            items = await parseExcelFile(excelFile);
+            const sheet = await parseExcelFile(excelFile);
+            items = sheet.items;
+            notices = sheet.warnings;
         }
         if (items.length === 0) throw new Error('No line items were detected. Confirm that the source contains item quantities and part numbers, then retry.');
-        publishQuoteImport(props.currentUser, items);
+        publishQuoteImport(props.currentUser, items, figures);
         setStatusSuccess(`${items.length} line item${items.length === 1 ? '' : 's'} imported into the quote.`);
+        setStatusNotices(notices);
         setStatus("Complete");
     } catch (err) {
         setStatus("Error");
@@ -336,6 +359,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
         setTimeout(() => {
           setStatus("Idle");
           setStatusSuccess(null);
+          // Notices are deliberately not cleared with the success banner: a discount that does
+          // not reconcile needs to still be on screen when the user comes back to the quote.
         }, 5000);
     }
   };
@@ -522,6 +547,16 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
               <p role="status" className="mt-3 text-[10px] font-bold leading-relaxed text-emerald-700">
                 {statusSuccess}
               </p>
+            )}
+            {statusNotices.length > 0 && (
+              <div role="status" className="mt-3 space-y-1 border-l-2 border-amber-400 pl-2">
+                <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Check before quoting</p>
+                {statusNotices.map((notice, index) => (
+                  <p key={index} className="text-[10px] font-bold leading-relaxed text-amber-700">
+                    {notice}
+                  </p>
+                ))}
+              </div>
             )}
           </div>
 
@@ -789,7 +824,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = (props) => {
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                   </div>
                   <div>
-                    <h4 className="text-[12px] font-black uppercase text-slate-900 group-hover:text-cat-black transition-colors">{q.title}</h4>
+                    <h4 className="text-[12px] font-black uppercase text-slate-900 group-hover:text-cat-black transition-colors flex items-center gap-2">
+                      {q.title}
+                      {isDraftQuote(q) && (
+                        <span
+                          className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[8px] font-black tracking-widest"
+                          title="A line item has no part number. This quote cannot be sent, exported or synced until it is filled in."
+                        >
+                          DRAFT
+                        </span>
+                      )}
+                    </h4>
                     <p className="text-[9px] text-slate-400 font-bold uppercase mt-1 group-hover:text-cat-black/60 transition-colors">
                       {new Date(q.timestamp).toLocaleDateString()} • BY {q.author}
                     </p>

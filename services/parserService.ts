@@ -2,6 +2,12 @@
 import { QuoteItem, ClientInfo } from '../types.ts';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import { readSpreadsheetRows } from './spreadsheetService.ts';
+import { PageModel, TextItem } from './parser/geometry.ts';
+import { CoreItem, extractItems } from './parser/core.ts';
+import { DocumentSummary, extractDocumentSummary } from './parser/documentSummary.ts';
+import { selectAdapter } from './parser/adapters/index.ts';
+import { describeEmptyResult, validateItems } from './parser/validate.ts';
+import { Reconciliation, reconcileTotals } from './parser/reconcile.ts';
 import { normalizeAvailability } from './availability.ts';
 
 // --- Helper Functions ---
@@ -242,6 +248,13 @@ function processItemLine(item: QuoteItem, lineText: string): void {
  * Ring Power specific line-item parser refined for accuracy and multi-line resilience.
  * Supports continuation flag for multi-page documents.
  */
+/**
+ * Ring Power line-oriented parser.
+ *
+ * Unexercised by every fixture in `fixtures/quotes` — but that is a statement about this disk,
+ * not about production, and a real Ring Power quote would still reach it through the fallback
+ * chain.  Kept and registered for that reason; see LEGACY_STRATEGIES.
+ */
 function parseRingPowerPage(textLines: {y: number, text: string}[], isContinuation: boolean = false): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
   const yCoords: number[] = [];
@@ -372,7 +385,10 @@ function parseRingPowerPage(textLines: {y: number, text: string}[], isContinuati
 
 
 /**
- * John Deere specific line-item parser.
+ * John Deere / Dobbs Equipment line-item parser.
+ *
+ * Unexercised by the fixtures on this disk, kept for the same reason as parseRingPowerPage: a
+ * real Dobbs quote from a customer would still land here.
  */
 function parseJohnDeerePage(textLines: {y: number, text: string, x?: number}[]): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
@@ -650,66 +666,21 @@ interface RawTextItem {
   height: number;
 }
 
-// Parts.Cat.Com order PDFs expose separate Item, Quantity, Description and
-// Availability columns. Keep each availability cell inside its own item row;
-// a flattened page string can attach a wrapped bucket to the following part.
-interface CatOrderColumns { itemX: number; quantityX: number; descriptionX: number; availabilityX: number; }
-
-function parseCatOrderPage(rawItems: RawTextItem[], previousColumns: CatOrderColumns | null): { items: QuoteItem[], yCoords: number[], columns: CatOrderColumns | null } {
-  const header = rawItems.find(item => /^Items In Your Order$/i.test(item.text.trim()));
-  const itemHeader = rawItems.find(item => /^Item$/i.test(item.text.trim()));
-  const quantityHeader = rawItems.find(item => /^Quantity$/i.test(item.text.trim()));
-  const descriptionHeader = rawItems.find(item => /^Product Description$/i.test(item.text.trim()));
-  const availabilityHeader = rawItems.find(item => /^Availability$/i.test(item.text.trim()));
-  const columns = header && itemHeader && quantityHeader && descriptionHeader && availabilityHeader
-    ? { itemX: itemHeader.x, quantityX: quantityHeader.x, descriptionX: descriptionHeader.x, availabilityX: availabilityHeader.x }
-    : previousColumns;
-  if (!columns) return { items: [], yCoords: [], columns: null };
-
-  const anchors = rawItems.filter(item => /^\d+$/.test(item.text.trim()) &&
-    Math.abs(item.x - columns.itemX) < 14 && item.y < (itemHeader?.y ?? Infinity) - 10)
-    .sort((a, b) => b.y - a.y);
-  const items: QuoteItem[] = [];
-  const yCoords: number[] = [];
-  for (let index = 0; index < anchors.length; index++) {
-    const anchor = anchors[index];
-    const nextY = anchors[index + 1]?.y ?? -Infinity;
-    const row = rawItems.filter(item => item.y <= anchor.y + 5 && item.y > nextY + 5);
-    const part = row.find(item => Math.abs(item.x - columns.descriptionX) < 22 &&
-      /^([A-Z0-9]+-[A-Z0-9]+):?\s*/i.test(item.text.trim()));
-    if (!part) continue;
-    const partMatch = part.text.trim().match(/^([A-Z0-9]+-[A-Z0-9]+):?\s*(.*)$/i)!;
-    const quantity = row.find(item => Math.abs(item.x - columns.quantityX) < 20 &&
-      Math.abs(item.y - anchor.y) < 12 && /^\d+$/.test(item.text.trim()));
-    const unitCell = row.find(item => /\$[\d,]+\.\d{2}\s*Ea\./i.test(item.text));
-    if (!quantity || !unitCell) continue;
-    const descriptionCells = row.filter(item => item.x >= columns.descriptionX - 20 &&
-      item.x < columns.availabilityX - 45 && item.y <= part.y + 4 &&
-      !/\bWeight\s*\(|^Non-returnable part$/i.test(item.text.trim()));
-    const description = descriptionCells.sort((a, b) => b.y - a.y || a.x - b.x)
-      .map(item => item === part ? partMatch[2] : item.text).join(' ').trim();
-    const weightCell = row.find(item => /\bWeight\s*\(/i.test(item.text));
-    const nonReturnable = row.some(item => /^Non-returnable part$/i.test(item.text.trim()));
-    const availabilityText = row.filter(item => item.x >= columns.availabilityX - 25 &&
-      item.y < anchor.y - 5 && !/\$|\bUSD\b|\bEa\./i.test(item.text))
-      .sort((a, b) => b.y - a.y || a.x - b.x)
-      .map(item => item.text).join(' ');
-    items.push({
-      lineNo: anchor.text.trim(),
-      qty: Number(quantity.text.trim()),
-      partNo: partMatch[1],
-      desc: description,
-      weight: weightCell ? extractWeight(weightCell.text).weight : 0,
-      unitPrice: Number(unitCell.text.match(/\$([\d,]+\.\d{2})/)![1].replace(/,/g, '')),
-      availability: normalizeAvailability(availabilityText),
-      notes: nonReturnable ? 'Non-returnable part' : '',
-      originalImages: []
-    });
-    yCoords.push(anchor.y);
-  }
-  return { items, yCoords, columns };
-}
-
+/**
+ * Legacy coordinate-assisted table parser.
+ *
+ * NOT deprecated and NOT dead: it is still registered as a fallback because no fixture on this
+ * disk proves what production sends.  It is, however, known to produce false positives, and the
+ * evidence is specific — run against `fixtures/quotes/cat-partscatcom-boyd-2026-08.pdf` it
+ * returns six "items" (ONLINE25, a promotion blurb, Payment Information, BILLING METHOD,
+ * Billing Address, SUMMARY OF CHARGES), and against the round-trip quote it returns seven, of
+ * which the part numbers are weights.  Both are asserted in test/parser-fixtures.test.mjs.
+ *
+ * Two things now contain that: the geometry core runs first and wins any disagreement, and
+ * whatever this returns still has to pass `validateItems` before it can reach a QuoteItem.
+ * It requires the literal token "part" in the header row, which is why it found nothing at all
+ * on the Parts.Cat.Com layout — that header reads Item / Quantity / Product Description.
+ */
 function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
   const yCoords: number[] = [];
@@ -837,17 +808,48 @@ function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCo
   return { items, yCoords };
 }
 
-export const parseTextData = (text: string): QuoteItem[] => {
+/** What a paste or spreadsheet import produced, plus anything the guard had to say about it. */
+export interface ItemParseResult {
+  items: QuoteItem[];
+  warnings: string[];
+}
+
+/**
+ * Parse pasted quote text.
+ *
+ * Runs the same legacy strategies as before — but its output now goes through the same
+ * part-number validation as the PDF path. It had none, which meant the exact strategies that
+ * returned "25 LBS" and "SUMMARY OF CHARGES" as part numbers on a PDF could still do it here.
+ * Pasted text is inferred, not declared, so the family requirement applies in full.
+ */
+export const parseTextData = (text: string): ItemParseResult => {
   const lines = text.split('\n').map((l, i) => ({ y: i * 20, text: l }));
   let result = parseRingPowerPage(lines);
   if (result.items.length === 0) result = parseFallback(lines);
   if (result.items.length === 0) result = parseFuzzy(lines);
-  return result.items;
+
+  const validated = validateItems(result.items, { requireFamilyMatch: true });
+  if (!validated.accepted.length && validated.rejected.length) {
+    throw new Error(
+      `None of the ${validated.rejected.length} candidate line item(s) carried a recognisable part number: ` +
+        validated.rejected.slice(0, 5).map((r) => `"${r.value}" (${r.reason})`).join(', ') +
+        '. Check that the pasted text includes part numbers.',
+    );
+  }
+  return { items: validated.accepted, warnings: validated.warnings };
 };
 
-export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
+/**
+ * Parse a CSV or spreadsheet.
+ *
+ * The part number here is declared — the user put it in a column named for it — so the family
+ * requirement is relaxed and a mismatch is reported rather than dropped, which keeps aftermarket
+ * SKUs importable. The shape vetoes still apply, so a weight or a currency value in that column
+ * is still refused.
+ */
+export const parseExcelFile = async (file: File): Promise<ItemParseResult> => {
   const jsonData = await readSpreadsheetRows(file);
-  return jsonData.map((row: any) => {
+  const rows: QuoteItem[] = jsonData.map((row: any) => {
     const unitPrice = Number(row.unitPrice || row.Price || row['Unit Price'] || 0);
     const weight = Number(row.weight || row.Weight || 0);
     return {
@@ -861,277 +863,569 @@ export const parseExcelFile = async (file: File): Promise<QuoteItem[]> => {
       originalImages: []
     };
   }).filter((item: QuoteItem) => item.partNo && item.partNo.length > 3 && !isDateString(item.partNo));
+
+  const validated = validateItems(rows, { requireFamilyMatch: false });
+  if (!validated.accepted.length && validated.rejected.length) {
+    throw new Error(
+      `None of the ${validated.rejected.length} row(s) carried a usable part number: ` +
+        validated.rejected.slice(0, 5).map((r) => `"${r.value}" (${r.reason})`).join(', ') + '.',
+    );
+  }
+  return { items: validated.accepted, warnings: validated.warnings };
 };
 
-export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], clientInfo: Partial<ClientInfo>}> => {
-  if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('PDF files must be between 1 byte and 10 MB.');
+// --- PDF entry point -----------------------------------------------------------------------
+
+/**
+ * Result of parsing a supplier PDF.
+ *
+ * `items` and `clientInfo` are unchanged from the previous contract, so the Intake Center and
+ * everything downstream of it keep working untouched.  The rest is additive.
+ */
+export interface PdfParseResult {
+  items: QuoteItem[];
+  clientInfo: Partial<ClientInfo>;
+  /** Order-level totals and header fields.  Totals are reported as printed, never recomputed. */
+  summary: DocumentSummary;
+  /**
+   * Things a person should check before quoting: a total that does not reconcile, a redacted
+   * price, a line with no part number.  This is what the Intake Center shows.
+   */
+  warnings: string[];
+  /**
+   * Engineering detail — which strategy produced the items and where the legacy strategies
+   * disagreed.  Deliberately kept out of the UI: "Legacy strategy table-based found 6 items"
+   * means nothing to a parts salesperson, and burying the reconciliation warnings in noise is
+   * how a panel stops being read.
+   */
+  diagnostics: string[];
+  /** Which strategy produced `items` — "geometry-core+caterpillar", "legacy:ring-power", ... */
+  strategy: string;
+  /** Line-item total checked against the printed subtotal and total.  Never auto-corrected. */
+  reconciliation: Reconciliation;
+}
+
+/** A legacy strategy's output, with the anchor coordinates needed to pair images. */
+interface LegacyResult {
+  name: string;
+  items: QuoteItem[];
+  anchors: { pageNumber: number; y: number }[];
+}
+
+/** One page's worth of input for the legacy line-oriented strategies. */
+interface LegacyPageInput {
+  pageNumber: number;
+  textLines: { y: number; text: string }[];
+  rawItems: RawTextItem[];
+  pageText: string;
+}
+
+/** Read Parts.Cat.Com's availability column within each numbered item row. */
+function catAvailabilityByLine(pages: readonly LegacyPageInput[]): Map<string, string> {
+  const result = new Map<string, string>();
+  if (!pages.some(page => /parts\.cat\.com/i.test(page.pageText))) return result;
+  let columns: { itemX: number; descriptionX: number } | null = null;
+  for (const page of pages) {
+    const raw = page.rawItems;
+    const title = raw.find(item => /^Items In Your Order$/i.test(item.text.trim()));
+    const firstPart = raw.find(item => /^[A-Z0-9]+-[A-Z0-9]+:\s*/i.test(item.text.trim()));
+    if (title && firstPart) {
+      columns = { itemX: title.x, descriptionX: firstPart.x };
+    }
+    if (!columns) continue;
+    const anchors = raw.filter(item => /^\d+$/.test(item.text.trim()) &&
+      Math.abs(item.x - columns!.itemX) < 14 && item.y < (title?.y ?? Infinity) - 10)
+      .sort((a, b) => b.y - a.y);
+    for (let index = 0; index < anchors.length; index++) {
+      const anchor = anchors[index];
+      const nextY = anchors[index + 1]?.y ?? -Infinity;
+      const row = raw.filter(item => item.y <= anchor.y + 5 && item.y > nextY + 5);
+      const part = row.find(item => Math.abs(item.x - columns!.descriptionX) < 22 &&
+        /^([A-Z0-9]+-[A-Z0-9]+):?\s*/i.test(item.text.trim()));
+      const partNo = part?.text.trim().match(/^([A-Z0-9]+-[A-Z0-9]+):?/i)?.[1];
+      if (!partNo) continue;
+      const unitCell = row.find(item => /\$[\d,]+\.\d{2}\s*Ea\./i.test(item.text));
+      if (!unitCell) continue;
+      const source = row.filter(item => item.x >= unitCell.x - 40 &&
+        item.y < anchor.y - 5 && !/\$|\bUSD\b|\bEa\./i.test(item.text))
+        .sort((a, b) => b.y - a.y || a.x - b.x)
+        .map(item => item.text).join(' ');
+      const availability = normalizeAvailability(source);
+      if (availability) result.set(`${page.pageNumber}:${anchor.text.trim()}:${partNo}`, availability);
+    }
+  }
+  return result;
+}
+
+/**
+ * The pre-geometry strategies, kept and registered rather than replaced.
+ *
+ * None of them fires on any fixture in `fixtures/quotes`, but absence from this disk is not
+ * absence from production: a Ring Power or Dobbs/Deere quote from a real customer would still
+ * land on them, and deleting them would break that silently.  They now run only when the
+ * geometry core comes up empty, and their output goes through the same part-number validation,
+ * which is what stops them re-introducing the garbage they used to emit.
+ */
+interface LegacyStrategy {
+  name: string;
+  /** True when this strategy claims the document (brand sniffing, as before). */
+  claims(input: LegacyPageInput, state: LegacyState): boolean;
+  run(input: LegacyPageInput, state: LegacyState): { items: QuoteItem[]; yCoords: number[] };
+}
+
+interface LegacyState {
+  isRingDocument: boolean;
+  isJohnDeereDocument: boolean;
+}
+
+const LEGACY_STRATEGIES: LegacyStrategy[] = [
+  {
+    name: 'ring-power',
+    claims: (_input, state) => state.isRingDocument,
+    run: (input, _state) => parseRingPowerPage(input.textLines, input.pageNumber > 1),
+  },
+  {
+    name: 'john-deere',
+    claims: (_input, state) => state.isJohnDeereDocument,
+    run: (input) => parseJohnDeerePage(input.textLines),
+  },
+  {
+    name: 'table-based',
+    claims: () => true,
+    run: (input) => parseTableBasedPage(input.rawItems),
+  },
+  {
+    name: 'fallback',
+    claims: () => true,
+    run: (input) => parseFallback(input.textLines),
+  },
+  {
+    name: 'fuzzy',
+    claims: () => true,
+    run: (input) => parseFuzzy(input.textLines),
+  },
+];
+
+/** Map a geometry-core item onto the QuoteItem contract, adding only optional fields. */
+function toQuoteItem(item: CoreItem): QuoteItem {
+  return {
+    lineNo: item.lineNo,
+    qty: item.qty,
+    partNo: item.partNo,
+    desc: item.desc,
+    weight: item.weight,
+    unitPrice: item.unitPrice,
+    coreDeposit: item.coreDeposit,
+    availability: item.availability,
+    notes: item.notes,
+    originalImages: [],
+    extendedPrice: item.extendedPrice,
+    currency: item.currency,
+    leadTime: item.leadTime,
+    warnings: item.warnings.length ? item.warnings : undefined,
+    confidence: item.confidence,
+    rawLines: item.rawLines,
+  };
+}
+
+/**
+ * Image extraction, unchanged in behaviour and moved into its own function so the page loop
+ * stays readable.  Best effort throughout: a PDF whose images cannot be decoded must still
+ * yield its line items.
+ */
+async function extractPageImages(
+  page: any,
+  pdfjs: any,
+): Promise<{ y: number; x: number; dataUrl: string; width: number; height: number }[]> {
+  const images: { y: number; x: number; dataUrl: string; width: number; height: number }[] = [];
+
+  const resolvePageImage = (imageKey: string): Promise<any | null> =>
+    new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: any) => {
+        if (settled) return;
+        settled = true;
+        resolve(value || null);
+      };
+      const timer = window.setTimeout(() => finish(null), 3_000);
+      try {
+        const callbackResult = page.objs.get(imageKey, (value: any) => {
+          window.clearTimeout(timer);
+          finish(value);
+        });
+        if (callbackResult && typeof callbackResult.then === 'function') {
+          callbackResult
+            .then((value: any) => {
+              window.clearTimeout(timer);
+              finish(value);
+            })
+            .catch(() => {
+              window.clearTimeout(timer);
+              finish(null);
+            });
+        } else if (callbackResult && typeof callbackResult === 'object') {
+          window.clearTimeout(timer);
+          finish(callbackResult);
+        }
+      } catch {
+        window.clearTimeout(timer);
+        finish(null);
+      }
+    });
+
+  const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
+    const transformStack: any[] = [];
+    let currentTransform = [...initialTransform];
+
+    for (let i = 0; i < fnArray.length; i++) {
+      // Yield to the main thread periodically so a large PDF does not freeze the UI.
+      if (i % 5000 === 0 && i > 0) await new Promise((r) => setTimeout(r, 0));
+
+      const fn = fnArray[i];
+      const args = argsArray[i];
+
+      if (fn === pdfjs.OPS.save) {
+        transformStack.push([...currentTransform]);
+      } else if (fn === pdfjs.OPS.restore) {
+        currentTransform = transformStack.pop() || [1, 0, 0, 1, 0, 0];
+      } else if (fn === pdfjs.OPS.transform) {
+        currentTransform = pdfjs.Util.transform(currentTransform, args);
+      } else if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject) {
+        try {
+          let imgData: any = null;
+          if (fn === pdfjs.OPS.paintImageXObject) {
+            imgData = await resolvePageImage(args[0]);
+          } else {
+            imgData = args[0];
+          }
+
+          if (imgData) {
+            const width = imgData.width || (imgData.bitmap && imgData.bitmap.width) || imgData.naturalWidth;
+            const height = imgData.height || (imgData.bitmap && imgData.bitmap.height) || imgData.naturalHeight;
+            if (!width || !height || width < 20 || height < 20) continue;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              if (imgData.bitmap) {
+                ctx.drawImage(imgData.bitmap, 0, 0);
+              } else if (imgData.data) {
+                const imageData = ctx.createImageData(width, height);
+                const data = imgData.data;
+                const pixels = imageData.data;
+                if (data.length === width * height * 3) {
+                  for (let p = 0, q = 0; p < data.length; p += 3, q += 4) {
+                    pixels[q] = data[p];
+                    pixels[q + 1] = data[p + 1];
+                    pixels[q + 2] = data[p + 2];
+                    pixels[q + 3] = 255;
+                  }
+                } else if (data.length === width * height * 4) {
+                  pixels.set(data);
+                } else if (data.length === width * height) {
+                  for (let p = 0, q = 0; p < data.length; p++, q += 4) {
+                    pixels[q] = pixels[q + 1] = pixels[q + 2] = data[p];
+                    pixels[q + 3] = 255;
+                  }
+                }
+                ctx.putImageData(imageData, 0, 0);
+              } else if (
+                imgData instanceof HTMLImageElement ||
+                imgData instanceof HTMLCanvasElement ||
+                imgData instanceof ImageBitmap
+              ) {
+                ctx.drawImage(imgData, 0, 0);
+              }
+              images.push({
+                y: currentTransform[5],
+                x: currentTransform[4],
+                width,
+                height,
+                dataUrl: canvas.toDataURL('image/jpeg', 0.8),
+              });
+            }
+          }
+        } catch {
+          // Text extraction still succeeds when a PDF image cannot be decoded.
+        }
+      }
+    }
+  };
+
+  let imageExtractionTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const imageExtraction = (async () => {
+      const operatorList = await page.getOperatorList();
+      await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
+    })();
+    const timeout = new Promise<never>((_, reject) => {
+      imageExtractionTimeout = setTimeout(() => reject(new Error('PDF image extraction timed out.')), 20_000);
+    });
+    await Promise.race([imageExtraction, timeout]);
+  } catch {
+    // Image extraction is best effort and must not block quote extraction.
+  } finally {
+    if (imageExtractionTimeout) clearTimeout(imageExtractionTimeout);
+  }
+
+  return images;
+}
+
+/**
+ * Parse a supplier PDF into line items.
+ *
+ * Order of operations: read every page's words with their coordinates, ask the geometry core for
+ * items, and only if it finds none fall through to the legacy per-brand strategies.  Whatever
+ * produces the items, they pass the same part-number validation before being returned, and if
+ * nothing survives the caller gets a diagnosis naming the stage that came up short rather than
+ * the old "No items detected in source."
+ */
+export const parsePdfFile = async (file: File): Promise<PdfParseResult> => {
+  if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
+    throw new Error('PDF files must be between 1 byte and 10 MB.');
+  }
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   // The Suite proxy rewrites this emitted /assets URL into /hub-proxy/assets.
   // Keeping the client value untouched prevents a second proxy prefix after
   // Vite folds this imported URL into the production bundle.
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-  
-  let fullItems: QuoteItem[] = [];
-  let clientInfo: Partial<ClientInfo> = {};
-  
-  // State persistence across pages
-  let isRingDocument = false;
-  let isJohnDeereDocument = false;
-  let isCatOrderDocument = false;
-  let catOrderColumns: CatOrderColumns | null = null;
-  
+
+  let pdf: any;
+  try {
+    pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  } catch (error: any) {
+    const name = String(error?.name || '');
+    if (/Password/i.test(name) || /password/i.test(String(error?.message || ''))) {
+      throw new Error('This PDF is password protected. Remove the password and upload it again.');
+    }
+    throw new Error('This file could not be opened as a PDF. Confirm it is not corrupt, then retry.');
+  }
+
+  const warnings: string[] = [];
+  const diagnostics: string[] = [];
+  const pages: PageModel[] = [];
+  const legacyPages: LegacyPageInput[] = [];
+  const imagesByPage = new Map<number, { y: number; x: number; dataUrl: string; width: number; height: number }[]>();
+  const legacyState: LegacyState = { isRingDocument: false, isJohnDeereDocument: false };
+
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1 });
     const textContent = await page.getTextContent();
+
+    // Geometry model: coordinates preserved, normalised against the page box so Letter, A4 and
+    // Legal all behave the same.
+    const items: TextItem[] = [];
+    for (const item of textContent.items as any[]) {
+      if (typeof item?.str !== 'string') continue;
+      const transform = item.transform || [1, 0, 0, 1, 0, 0];
+      const fontSize = Math.hypot(transform[0], transform[1]) || item.height || 9;
+      const baselineFromTop = viewport.height - transform[5];
+      items.push({
+        text: item.str,
+        x0: transform[4],
+        x1: transform[4] + (item.width || 0),
+        top: baselineFromTop - (item.height || fontSize),
+        bottom: baselineFromTop,
+        fontSize,
+        fontName: item.fontName,
+      });
+    }
+    pages.push({ pageNumber: pageNum, width: viewport.width, height: viewport.height, items });
+
+    // Legacy model: the flattened line view the pre-geometry strategies were written against.
     const linesMap = new Map<number, any[]>();
-    
-    textContent.items.forEach((item: any) => {
+    (textContent.items as any[]).forEach((item: any) => {
+      if (typeof item?.str !== 'string') return;
       const y = Math.round(item.transform[5]);
       let matchY: number | undefined;
-      for (const key of linesMap.keys()) { 
-        if (Math.abs(key - y) <= 8) { matchY = key; break; } 
+      for (const key of linesMap.keys()) {
+        if (Math.abs(key - y) <= 8) {
+          matchY = key;
+          break;
+        }
       }
-      if (matchY === undefined) { 
-        matchY = y; 
-        linesMap.set(matchY, []); 
+      if (matchY === undefined) {
+        matchY = y;
+        linesMap.set(matchY, []);
       }
       linesMap.get(matchY)!.push(item);
     });
-
     const sortedY = Array.from(linesMap.keys()).sort((a, b) => b - a);
-    const textLines = sortedY.map(y => ({
-      y,
-      text: linesMap.get(y)!.sort((a, b) => a.transform[4] - b.transform[4]).map(it => it.str).join(' ').trim()
-    })).filter(l => l.text.length > 0);
+    const textLines = sortedY
+      .map((y) => ({
+        y,
+        text: linesMap
+          .get(y)!
+          .sort((a, b) => a.transform[4] - b.transform[4])
+          .map((it) => it.str)
+          .join(' ')
+          .trim(),
+      }))
+      .filter((l) => l.text.length > 0);
+    const rawItems: RawTextItem[] = (textContent.items as any[])
+      .filter((item: any) => typeof item?.str === 'string')
+      .map((item: any) => ({
+        text: item.str,
+        x: item.transform[4],
+        y: item.transform[5],
+        width: item.width,
+        height: item.height,
+      }))
+      .filter((it: any) => it.text.trim().length > 0);
+    const pageText = textLines.map((l) => l.text).join(' ');
 
-    const rawItems: RawTextItem[] = textContent.items.map((item: any) => ({
-      text: item.str,
-      x: item.transform[4],
-      y: item.transform[5],
-      width: item.width,
-      height: item.height
-    })).filter((it: any) => it.text.trim().length > 0);
+    if (/Ring Power|RING POWER CORPORATION/i.test(pageText)) legacyState.isRingDocument = true;
+    if (/John Deere|Dobbs Equipment/i.test(pageText)) legacyState.isJohnDeereDocument = true;
 
-    const pageText = textLines.map(l => l.text).join(' ');
-    
-    // Identity check on every page to ensure state is maintained
-    if (/Ring Power|RING POWER CORPORATION/i.test(pageText)) {
-        isRingDocument = true;
+    legacyPages.push({ pageNumber: pageNum, textLines, rawItems, pageText });
+    imagesByPage.set(pageNum, await extractPageImages(page, pdfjs));
+  }
+
+  const summary = extractDocumentSummary(pages);
+  warnings.push(...summary.warnings);
+  const clientInfo: Partial<ClientInfo> = legacyPages.length ? extractClientInfo(legacyPages[0].textLines) : {};
+
+  const selection = selectAdapter(pages);
+  const coreResult = extractItems(pages, selection.options);
+  const coreValidated = validateItems(coreResult.items, {
+    families: selection.options.families,
+    allowBlankPartNumbers: true,
+  });
+  warnings.push(...coreValidated.warnings);
+
+  let items: QuoteItem[] = coreValidated.accepted.map(toQuoteItem);
+  const catAvailability = catAvailabilityByLine(legacyPages);
+  items = items.map((item, index) => {
+    const core = coreValidated.accepted[index];
+    const source = catAvailability.get(`${core.pageNumber}:${item.lineNo}:${item.partNo}`);
+    return source ? { ...item, availability: source } : item;
+  });
+  let coreItems: CoreItem[] = coreValidated.accepted;
+  // Bottom-origin PDF coordinates, the same space the operator list reports image positions in.
+  // pageModel.height - item.anchorY is exactly transform[5], so this reproduces the coordinate
+  // the previous parser matched on.
+  let imageAnchors: { pageNumber: number; y: number }[] = coreValidated.accepted.map((item) => ({
+    pageNumber: item.pageNumber,
+    y: (pages.find((p) => p.pageNumber === item.pageNumber)?.height ?? 0) - item.anchorY,
+  }));
+  let strategy = items.length
+    ? `geometry-core${selection.adapter && selection.adapter.name !== 'generic' ? `+${selection.adapter.name}` : ''}`
+    : '';
+
+  // Legacy strategies always run, but only to be compared against.  The core wins any
+  // disagreement; the disagreement itself is recorded so a regression in either is visible.
+  const legacyResults = runLegacyStrategies(legacyPages, legacyState);
+  if (items.length) {
+    for (const result of legacyResults) {
+      if (result.items.length && result.items.length !== items.length) {
+        diagnostics.push(
+          `Legacy strategy "${result.name}" found ${result.items.length} item(s) where the layout engine found ${items.length}; the layout engine's result was used.`,
+        );
+      }
     }
-    if (/John Deere|Dobbs Equipment/i.test(pageText)) {
-        isJohnDeereDocument = true;
+  } else {
+    for (const result of legacyResults) {
+      const validated = validateItems(result.items, { families: selection.options.families });
+      warnings.push(...validated.warnings);
+      if (validated.accepted.length) {
+        // Map surviving items back to their anchors: validation may have dropped some, so the
+        // index into `result.items` is what lines an item up with its coordinate.
+        imageAnchors = validated.accepted
+          .map((item) => result.items.indexOf(item as QuoteItem))
+          .map((index, position) => result.anchors[index] ?? result.anchors[position] ?? { pageNumber: 1, y: 0 });
+        items = validated.accepted;
+        coreItems = [];
+        strategy = `legacy:${result.name}`;
+        diagnostics.push(`The layout engine found no items; fell back to the legacy "${result.name}" strategy.`);
+        break;
+      }
     }
-    if (/Parts\.Cat\.Com/i.test(pageText)) {
-        isCatOrderDocument = true;
-    }
+  }
 
-    if (pageNum === 1) {
-        clientInfo = extractClientInfo(textLines);
-    }
+  if (!items.length) {
+    const failure = coreResult.failure;
+    const detail = failure?.message ?? 'No line items could be read from this document.';
+    const rejected = [...coreResult.rejected, ...coreValidated.rejected];
+    const rejectedNote = rejected.length
+      ? ` ${rejected.length} candidate(s) were rejected: ${rejected
+          .slice(0, 5)
+          .map((r) => `"${r.value}" (${r.reason})`)
+          .join(', ')}.`
+      : '';
+    throw new Error(
+      describeEmptyResult(failure?.kind ?? 'no-header', detail + rejectedNote, failure?.textPreview ?? ''),
+    );
+  }
 
-    let pageItems: QuoteItem[] = [];
-    let yCoords: number[] = [];
-
-    // Prioritize specialized parser if document type is known
-    if (isCatOrderDocument) {
-        const result = parseCatOrderPage(rawItems, catOrderColumns);
-        pageItems = result.items;
-        yCoords = result.yCoords;
-        catOrderColumns = result.columns;
-    } else if (isRingDocument) {
-        const result = parseRingPowerPage(textLines, pageNum > 1);
-        pageItems = result.items;
-        yCoords = result.yCoords;
-    } else if (isJohnDeereDocument) {
-        const result = parseJohnDeerePage(textLines);
-        pageItems = result.items;
-        yCoords = result.yCoords;
-    } else {
-        const tableResult = parseTableBasedPage(rawItems);
-        if (tableResult.items.length > 0) {
-            pageItems = tableResult.items;
-            yCoords = tableResult.yCoords;
-        }
-    }
-    
-    // Fallbacks if specialized parser didn't catch items or if it's an unknown document type
-    if (pageItems.length === 0) {
-        const fbResult = parseFallback(textLines);
-        pageItems = fbResult.items;
-        yCoords = fbResult.yCoords;
-        
-        if (pageItems.length === 0) {
-           const fuzzyResult = parseFuzzy(textLines);
-           pageItems = fuzzyResult.items;
-           yCoords = fuzzyResult.yCoords;
-        }
-    }
-
-    // --- Image Extraction Logic ---
-    const images: { y: number, x: number, dataUrl: string, width: number, height: number }[] = [];
-    
-    const resolvePageImage = (imageKey: string): Promise<any | null> => new Promise((resolve) => {
-        let settled = false;
-        const finish = (value: any) => {
-            if (settled) return;
-            settled = true;
-            resolve(value || null);
-        };
-        const timer = window.setTimeout(() => finish(null), 3_000);
-        try {
-            const callbackResult = page.objs.get(imageKey, (value: any) => {
-                window.clearTimeout(timer);
-                finish(value);
-            });
-            if (callbackResult && typeof callbackResult.then === 'function') {
-                callbackResult.then((value: any) => {
-                    window.clearTimeout(timer);
-                    finish(value);
-                }).catch(() => {
-                    window.clearTimeout(timer);
-                    finish(null);
-                });
-            } else if (callbackResult && typeof callbackResult === 'object') {
-                window.clearTimeout(timer);
-                finish(callbackResult);
-            }
-        } catch {
-            window.clearTimeout(timer);
-            finish(null);
-        }
-    });
-
-    const processOperatorList = async (fnArray: any[], argsArray: any[], initialTransform: number[]) => {
-        const transformStack: any[] = [];
-        let currentTransform = [...initialTransform];
-
-        for (let i = 0; i < fnArray.length; i++) {
-            // Yield to main thread every 5000 operations to prevent UI freeze
-            if (i % 5000 === 0 && i > 0) {
-                await new Promise(r => setTimeout(r, 0));
-            }
-            
-            const fn = fnArray[i];
-            const args = argsArray[i];
-
-            if (fn === pdfjs.OPS.save) {
-                transformStack.push([...currentTransform]);
-            } else if (fn === pdfjs.OPS.restore) {
-                currentTransform = transformStack.pop() || [1, 0, 0, 1, 0, 0];
-            } else if (fn === pdfjs.OPS.transform) {
-                currentTransform = pdfjs.Util.transform(currentTransform, args);
-            } else if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject) {
-                try {
-                    let imgData: any = null;
-                    if (fn === pdfjs.OPS.paintImageXObject) {
-                        const imgKey = args[0];
-                        imgData = await resolvePageImage(imgKey);
-                    } else {
-                        imgData = args[0];
-                    }
-                    
-                    if (imgData) {
-                        const width = imgData.width || (imgData.bitmap && imgData.bitmap.width) || imgData.naturalWidth;
-                        const height = imgData.height || (imgData.bitmap && imgData.bitmap.height) || imgData.naturalHeight;
-                        
-                        // Filter out tiny images (likely icons or spacers)
-                        if (!width || !height || width < 20 || height < 20) continue;
-
-                        const canvas = document.createElement("canvas");
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext("2d");
-                        if (ctx) {
-                            if (imgData.bitmap) {
-                                ctx.drawImage(imgData.bitmap, 0, 0);
-                            } else if (imgData.data) {
-                                const imageData = ctx.createImageData(width, height);
-                                const data = imgData.data;
-                                const pixels = imageData.data;
-                                
-                                if (data.length === width * height * 3) {
-                                    for (let p = 0, q = 0; p < data.length; p += 3, q += 4) {
-                                        pixels[q] = data[p]; pixels[q+1] = data[p+1]; pixels[q+2] = data[p+2]; pixels[q+3] = 255;
-                                    }
-                                } else if (data.length === width * height * 4) {
-                                    pixels.set(data);
-                                } else if (data.length === width * height) {
-                                    for (let p = 0, q = 0; p < data.length; p++, q += 4) {
-                                        pixels[q] = pixels[q+1] = pixels[q+2] = data[p]; pixels[q+3] = 255;
-                                    }
-                                }
-                                ctx.putImageData(imageData, 0, 0);
-                            } else if (imgData instanceof HTMLImageElement || imgData instanceof HTMLCanvasElement || imgData instanceof ImageBitmap) {
-                                ctx.drawImage(imgData, 0, 0);
-                            }
-                            images.push({ 
-                                y: currentTransform[5], 
-                                x: currentTransform[4],
-                                width: width,
-                                height: height,
-                                dataUrl: canvas.toDataURL("image/jpeg", 0.8) 
-                            });
-                        }
-                    }
-                } catch {
-                    // Text extraction still succeeds when a PDF image cannot be decoded.
-                }
-            }
-        }
-    };
-
-    let imageExtractionTimeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-        const imageExtraction = (async () => {
-          const operatorList = await page.getOperatorList();
-          await processOperatorList(operatorList.fnArray, operatorList.argsArray, [1, 0, 0, 1, 0, 0]);
-        })();
-        const timeout = new Promise<never>((_, reject) => {
-          imageExtractionTimeout = setTimeout(() => reject(new Error('PDF image extraction timed out.')), 20_000);
-        });
-        await Promise.race([imageExtraction, timeout]);
-    } catch {
-        // PDF image extraction is best-effort and must not block quote extraction.
-    } finally {
-        if (imageExtractionTimeout) clearTimeout(imageExtractionTimeout);
-    }
-
-    // Associate extracted images with items on this page
-    // Robust matching: Find the image closest to the item's Y coordinate
-    const availableImages = [...images];
-    pageItems.forEach((item, idx) => {
-      const itemY = yCoords[idx];
-      let bestImgIdx = -1;
-      let minDiff = Infinity;
-      
-      availableImages.forEach((img, i) => {
-        const diff = Math.abs(img.y - itemY);
-        // Keep logos/footer images away from parts by requiring a nearby row.
-        if (diff < minDiff && diff < 300) {
-          minDiff = diff; 
-          bestImgIdx = i; 
-        }
-      });
-      
-      if (bestImgIdx !== -1) {
-          item.originalImages = [availableImages[bestImgIdx].dataUrl];
-          availableImages.splice(bestImgIdx, 1);
+  // Pair each item with the nearest image on its own page.  Coordinates from the operator list
+  // are bottom-origin, so the anchor is converted back before comparing.
+  for (let index = 0; index < items.length; index++) {
+    const anchor = imageAnchors[index];
+    if (!anchor) continue;
+    const available = imagesByPage.get(anchor.pageNumber);
+    if (!available || !available.length) continue;
+    let bestIndex = -1;
+    let minDiff = Infinity;
+    available.forEach((image, i) => {
+      const diff = Math.abs(image.y - anchor.y);
+      // Keep logos and footer art away from parts by requiring a nearby row.
+      if (diff < minDiff && diff < 300) {
+        minDiff = diff;
+        bestIndex = i;
       }
     });
-
-    fullItems.push(...pageItems);
+    if (bestIndex !== -1) {
+      items[index] = { ...items[index], originalImages: [available[bestIndex].dataUrl] };
+      available.splice(bestIndex, 1);
+    }
   }
 
-  fullItems = fullItems.map(item => ({
-    ...item,
-    desc: cleanDescription(item.desc)
-  }));
-
-  if (fullItems.length === 0) {
-    throw new Error("No items detected in source. Please check the document format.");
+  // Cross-check the arithmetic last, once the final item set is known whichever strategy
+  // produced it.  A disagreement is reported, never resolved by adjusting a figure.
+  const reconciliation = reconcileTotals(coreItems.length ? coreItems : [], summary);
+  if (coreItems.length) {
+    for (const warning of reconciliation.warnings) {
+      if (/printed no extended price/.test(warning)) diagnostics.push(warning);
+      else warnings.push(warning);
+    }
   }
 
-  return { items: fullItems, clientInfo };
+  diagnostics.push(`Strategy: ${strategy}.`);
+  return { items, clientInfo, summary, warnings, diagnostics, strategy, reconciliation };
 };
+
+/** Run every legacy strategy over every page, collecting whatever each one claims to find. */
+function runLegacyStrategies(
+  legacyPages: readonly LegacyPageInput[],
+  state: LegacyState,
+): LegacyResult[] {
+  const results: LegacyResult[] = [];
+  for (const strategy of LEGACY_STRATEGIES) {
+    const collected: QuoteItem[] = [];
+    // Anchors are carried alongside the items so the fallback path can still pair images.
+    // These are bottom-origin PDF coordinates, exactly as the legacy strategies produced them.
+    const anchors: { pageNumber: number; y: number }[] = [];
+    for (const input of legacyPages) {
+      if (!strategy.claims(input, state)) continue;
+      try {
+        const { items, yCoords } = strategy.run(input, state);
+        items.forEach((item, index) => {
+          collected.push(item);
+          anchors.push({ pageNumber: input.pageNumber, y: yCoords[index] ?? 0 });
+        });
+      } catch {
+        // A legacy strategy throwing must never take the parse down; the core already ran.
+      }
+    }
+    results.push({
+      name: strategy.name,
+      items: collected.map((item) => ({ ...item, desc: cleanDescription(item.desc) })),
+      anchors,
+    });
+  }
+  return results;
+}

@@ -1,5 +1,6 @@
 
 import { CustomerAccount, SavedQuote, InvoiceData, Payment, RecurringInvoice, InvoiceTemplate, InventoryPart } from '../types.ts';
+import { isDraftQuote } from './quoteReadiness.ts';
 import { hubApiFetch } from './hubApi.ts';
 
 /**
@@ -495,6 +496,19 @@ function stampCanonicalMtimes(records: unknown, cached: unknown): unknown {
   });
 }
 
+/**
+ * Drafts are cached locally but never uploaded.
+ *
+ * This is the single chokepoint every quote write passes through, so a quote with a blank part
+ * number cannot reach IronSuite by any route — not through Save to Archive, not through the
+ * bulk bridge push, not through a future caller nobody has written yet.  The local copy keeps
+ * every quote, so nothing is lost by holding one back.
+ */
+function withoutDraftQuotes<T>(storeName: string, data: T): T {
+  if (storeName !== 'quotes' || !Array.isArray(data)) return data;
+  return (data as unknown[]).filter((quote) => !isDraftQuote(quote as never)) as unknown as T;
+}
+
 async function setData<T>(storeName: string, username: string, data: T): Promise<CloudWriteResult> {
   const canonical = CANONICAL_STORES.has(storeName);
   if (canonical) {
@@ -505,18 +519,18 @@ async function setData<T>(storeName: string, username: string, data: T): Promise
 
   if (isUp) {
     // Server handles chunking for large data — always try server first
-    const ok = await serverSet(username, storeName, data);
+    const ok = await serverSet(username, storeName, withoutDraftQuotes(storeName, data));
     const cached = await localSet(storeName, username, data);
     if (canonical) {
       if (ok) await clearPendingCanonicalWrite(username, storeName);
-      else await rememberPendingCanonicalWrite(username, storeName, data);
+      else await rememberPendingCanonicalWrite(username, storeName, withoutDraftQuotes(storeName, data));
     }
     return { synced: ok, cached };
   }
 
   // The cache can keep the user productive, but it is not a Suite sync.
   const cached = await localSet(storeName, username, data);
-  if (canonical) await rememberPendingCanonicalWrite(username, storeName, data);
+  if (canonical) await rememberPendingCanonicalWrite(username, storeName, withoutDraftQuotes(storeName, data));
   return { synced: false, cached };
 }
 

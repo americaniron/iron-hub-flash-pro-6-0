@@ -9,11 +9,19 @@ import { ToastStack, useToasts } from './components/Toast.tsx';
 import { Logo } from './components/Logo.tsx';
 import { DEFAULT_LOGO, loadBranding, resolveBrandingUrl, saveBrandingLogo } from './services/branding.ts';
 import { DOCUMENT_HTML2PDF_MARGIN_IN, DOCUMENT_PAGE, drawDocumentFooter } from './services/documentLayout.ts';
+import {
+  acknowledgementCovers,
+  formatReconciliationPrompt,
+  quoteReadinessError,
+  quoteStatusFor,
+  reconciliationFingerprint,
+} from './services/quoteReadiness.ts';
 import { InvoiceSystem } from './components/InvoiceSystem.tsx';
 import { AccountsSystem } from './components/AccountsSystem.tsx';
 import { InventorySystem } from './components/InventorySystem.tsx';
 import { Dashboard } from './components/Dashboard.tsx';
-import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart } from './types.ts';
+import { QuoteItem, ClientInfo, AppConfig, CustomerAccount, User, PhotoMode, SavedQuote, SyncStatus, InvoiceData, Payment, ServiceItem, RecurringInvoice, InvoiceTemplate, InventoryPart, ReconciliationAcknowledgement } from './types.ts';
+import type { ReconciliationFigures } from './services/quoteReadiness.ts';
 import { analyzeQuoteData, generateTTS, generatePartImage, translateText, VoiceSynthesisError } from './services/claudeService.ts';
 import { describeVoiceDegradation, describeVoiceFailure, type VoiceNotice } from './services/voiceErrors.ts';
 import { dbService } from './services/dbService.ts';
@@ -166,6 +174,11 @@ const App: React.FC = () => {
     setCustomerAccounts(accounts);
   }, []);
   const [quoteHistory, setQuoteHistory] = useState<SavedQuote[]>([]);
+  // Figures read off the source document at import, and the acknowledgement of any mismatch.
+  // Both travel with the quote: the acknowledgement is fingerprinted against these numbers, so
+  // editing a price or a line invalidates it automatically.
+  const [reconciliationFigures, setReconciliationFigures] = useState<ReconciliationFigures | null>(null);
+  const [reconciliationAck, setReconciliationAck] = useState<ReconciliationAcknowledgement | null>(null);
   const [invoices, setInvoices] = useState<InvoiceData[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [inventory, setInventory] = useState<InventoryPart[]>([]);
@@ -483,6 +496,9 @@ const App: React.FC = () => {
     return subscribeToQuoteImports(user, (record) => {
       if (appliedQuoteImportRef.current === record.id) return;
       appliedQuoteImportRef.current = record.id;
+      setReconciliationFigures(record.figures ?? null);
+      // A new document means new numbers; an acknowledgement of the old ones cannot carry over.
+      setReconciliationAck(null);
       handleDataLoaded(record.items);
     });
   }, [user]);
@@ -694,6 +710,7 @@ const App: React.FC = () => {
 
   // ---- WhatsApp Share Handlers ----
   const handleWhatsAppQuote = async () => {
+    if (!ensureQuoteMayLeave('sent to a customer')) return;
     try {
       // Generate and auto-download the PDF
       const pdfBase64 = await generatePdf();
@@ -970,6 +987,7 @@ const App: React.FC = () => {
         alert("Cannot create an invoice from an empty quote or without a client.");
         return;
     }
+    if (!ensureQuoteMayLeave('converted to an invoice')) return;
     let clientAccount = client.id ? customerAccounts.find(c => c.id === client.id) : customerAccounts.find(c => c.company.toLowerCase() === client.company.toLowerCase());
     let updatedAccounts = customerAccounts;
     if (!clientAccount) {
@@ -1041,8 +1059,52 @@ const App: React.FC = () => {
     }
   };
 
+
+  /**
+   * The single gate between this quote and anything that leaves the app.
+   *
+   * Two checks, in order of severity.  A blank part number is a hard block — there is no version
+   * of a customer quote with a missing part number that is acceptable.  A totals mismatch is not,
+   * because a legitimate document can fail to reconcile (a supplier quote with redacted prices
+   * does exactly that), so it asks once and records the answer against these exact figures.
+   *
+   * Called by every customer-facing exit point rather than duplicated at each, so a new exit
+   * point cannot be added without going through it.
+   */
+  const ensureQuoteMayLeave = useCallback((action: string): boolean => {
+    const blocked = quoteReadinessError(items, action);
+    if (blocked) { alert(blocked); return false; }
+
+    if (!reconciliationFigures) return true;
+    const charges = (reconciliationFigures.itemsTotal ?? 0)
+      + (reconciliationFigures.shipping ?? 0)
+      + (reconciliationFigures.tax ?? 0);
+    const target = reconciliationFigures.total ?? reconciliationFigures.subtotal;
+    if (target === undefined) return true;
+    const comparable = reconciliationFigures.total !== undefined ? charges : reconciliationFigures.itemsTotal;
+    const gap = Math.round((comparable - target) * 100) / 100;
+    if (Math.abs(gap) <= 0.02) return true;
+
+    const fingerprint = reconciliationFingerprint(items, reconciliationFigures);
+    if (acknowledgementCovers(reconciliationAck, fingerprint)) return true;
+
+    if (!window.confirm(formatReconciliationPrompt(reconciliationFigures, action))) return false;
+    setReconciliationAck({
+      by: user?.username ?? 'unknown',
+      at: new Date().toISOString(),
+      fingerprint,
+      gap,
+    });
+    return true;
+  }, [items, reconciliationFigures, reconciliationAck, user]);
+
   const handleCommitToCloud = async () => {
     if (!user || items.length === 0) return false;
+    // A quote with a blank part number still saves — losing imported work would be the worse
+    // failure — but it is stamped `draft`, and dbService keeps drafts out of the payload sent
+    // to IronSuite.  Only a complete quote goes through the mismatch gate and syncs.
+    const status = quoteStatusFor(items);
+    if (status === 'ready' && !ensureQuoteMayLeave('synced to IronSuite')) return false;
     const company = client.company.trim() || client.contactName.trim();
     if (!company) {
       alert('Add a customer company or contact before saving this quote.');
@@ -1072,9 +1134,17 @@ const App: React.FC = () => {
       const total = calculateQuoteFinancials(items, config).total;
       const { quote: newSavedQuote, sync } = await dbService.saveQuote(user.username, {
         title: `${client.company || 'Entity'} - ${config.quoteId}`,
-        total, payload: { items, client: customer, config, aiAnalysis }
+        total,
+        status,
+        reconciliationAck: reconciliationAck ?? undefined,
+        payload: { items, client: customer, config, aiAnalysis }
       });
       setQuoteHistory(prev => [newSavedQuote, ...prev]);
+      if (status === 'draft') {
+        setSyncStatus('stable');
+        alert(`Saved to Archive as a DRAFT.\n\n${quoteReadinessError(items, 'sent, exported or synced') ?? ''}`);
+        return true;
+      }
       if (!sync.synced) {
         setSyncStatus('error');
         alert(canonicalSyncFailureMessage('Quote'));
@@ -1107,6 +1177,13 @@ const App: React.FC = () => {
   };
 
   const handleLoadFromArchive = (archive: SavedQuote) => {
+    setReconciliationAck(archive.reconciliationAck ?? null);
+    // Put the cursor on the thing that has to be fixed.  Deferred so the item rows have
+    // rendered; harmless when the quote is complete, because there is nothing to select.
+    setTimeout(() => {
+      const blank = document.querySelector<HTMLInputElement>('[data-partno-blank="true"]');
+      if (blank) { blank.scrollIntoView({ block: 'center', behavior: 'smooth' }); blank.focus(); }
+    }, 250);
     const { items: archivedItems, client: archivedClient, config: archivedConfig } = archive.payload;
     const migratedClient: ClientInfo = {
       accountNumber: archivedClient.accountNumber, company: archivedClient.company, contactName: archivedClient.contactName,
@@ -1132,7 +1209,12 @@ const App: React.FC = () => {
 
   const handleSaveQuote = () => {
     if (items.length === 0) return;
-    const data = { version: '2.5', timestamp: new Date().toISOString(), items, client, config, customLogo, aiAnalysis };
+    // Nothing incomplete is written as a normal quote — but it is still written.  The file
+    // carries `status: 'draft'` so reloading it lands back in the same blocked state rather
+    // than laundering the blank part number through a round trip.
+    const status = quoteStatusFor(items);
+    if (status === 'ready' && !ensureQuoteMayLeave('exported as a quote file')) return;
+    const data = { version: '2.5', status, reconciliationAck, timestamp: new Date().toISOString(), items, client, config, customLogo, aiAnalysis };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1166,6 +1248,12 @@ const App: React.FC = () => {
               shippingCountry: (archivedClient as any).shippingCountry || (archivedConfig as any).shippingCountry || 'United States',
             };
             setItems(archivedItems.map((item: QuoteItem) => ({...item, aiImageUrl: undefined})));
+            // Carry the mismatch acknowledgement back in, and drop it if the file did not have
+            // one. Without this a round trip through the JSON file re-prompted every time; the
+            // draft status itself is always recomputed from the items, so a blank part number
+            // cannot be laundered by editing the file.
+            setReconciliationAck(data.reconciliationAck ?? null);
+            setReconciliationFigures(null);
             setClient(migratedClient);
             setConfig(archivedConfig);
             setAiAnalysis(aiAnalysis || null);
@@ -1188,8 +1276,9 @@ const App: React.FC = () => {
 
   const handlePrint = useCallback(() => {
     if (activeSystem === 'quoting' && items.length === 0) return;
+    if (activeSystem === 'quoting' && !ensureQuoteMayLeave('printed')) return;
     window.print();
-  }, [items.length, activeSystem]);
+  }, [items, activeSystem, ensureQuoteMayLeave]);
 
   const handleExportData = async () => {
     if (!user) return;
@@ -1383,6 +1472,9 @@ const App: React.FC = () => {
   }
 
   const generatePdf = async () => {
+    // Gate every PDF at the source: WhatsApp and the email module both come through here, so a
+    // quote with a blank part number cannot become a customer-facing document by any route.
+    if (!ensureQuoteMayLeave('exported as a PDF')) return null;
     const element = document.querySelector('.printable-area') as HTMLElement;
     if (!element) return null;
     
@@ -1441,7 +1533,11 @@ const App: React.FC = () => {
               onConfigChange={setConfig} onClientChange={setClient}
               onAnalyze={handleAnalyze} onSaveQuote={handleSaveQuote}
               onLoadQuote={handleLoadLocalQuote} onCommitToCloud={handleCommitToCloud}
-              onPrint={() => { window.print(); activityBridge.quotePrinted(config.quoteId, user.username); }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
+              onPrint={() => {
+                if (!ensureQuoteMayLeave('printed')) return;
+                window.print();
+                activityBridge.quotePrinted(config.quoteId, user.username);
+              }} onEmailDispatch={() => setIsEmailOpen(true)} onWhatsAppQuote={handleWhatsAppQuote}
               onConvertToInvoice={handleConvertToInvoice} onGenerateAllImages={handleGenerateAllImages}
               onExportData={handleExportData} onImportData={handleImportData}
               onDownloadImagePool={handleDownloadImagePool}
