@@ -2,6 +2,7 @@
 import { QuoteItem, ClientInfo } from '../types.ts';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import { readSpreadsheetRows } from './spreadsheetService.ts';
+import { normalizeAvailability } from './availability.ts';
 
 // --- Helper Functions ---
 
@@ -649,6 +650,66 @@ interface RawTextItem {
   height: number;
 }
 
+// Parts.Cat.Com order PDFs expose separate Item, Quantity, Description and
+// Availability columns. Keep each availability cell inside its own item row;
+// a flattened page string can attach a wrapped bucket to the following part.
+interface CatOrderColumns { itemX: number; quantityX: number; descriptionX: number; availabilityX: number; }
+
+function parseCatOrderPage(rawItems: RawTextItem[], previousColumns: CatOrderColumns | null): { items: QuoteItem[], yCoords: number[], columns: CatOrderColumns | null } {
+  const header = rawItems.find(item => /^Items In Your Order$/i.test(item.text.trim()));
+  const itemHeader = rawItems.find(item => /^Item$/i.test(item.text.trim()));
+  const quantityHeader = rawItems.find(item => /^Quantity$/i.test(item.text.trim()));
+  const descriptionHeader = rawItems.find(item => /^Product Description$/i.test(item.text.trim()));
+  const availabilityHeader = rawItems.find(item => /^Availability$/i.test(item.text.trim()));
+  const columns = header && itemHeader && quantityHeader && descriptionHeader && availabilityHeader
+    ? { itemX: itemHeader.x, quantityX: quantityHeader.x, descriptionX: descriptionHeader.x, availabilityX: availabilityHeader.x }
+    : previousColumns;
+  if (!columns) return { items: [], yCoords: [], columns: null };
+
+  const anchors = rawItems.filter(item => /^\d+$/.test(item.text.trim()) &&
+    Math.abs(item.x - columns.itemX) < 14 && item.y < (itemHeader?.y ?? Infinity) - 10)
+    .sort((a, b) => b.y - a.y);
+  const items: QuoteItem[] = [];
+  const yCoords: number[] = [];
+  for (let index = 0; index < anchors.length; index++) {
+    const anchor = anchors[index];
+    const nextY = anchors[index + 1]?.y ?? -Infinity;
+    const row = rawItems.filter(item => item.y <= anchor.y + 5 && item.y > nextY + 5);
+    const part = row.find(item => Math.abs(item.x - columns.descriptionX) < 22 &&
+      /^([A-Z0-9]+-[A-Z0-9]+):?\s*/i.test(item.text.trim()));
+    if (!part) continue;
+    const partMatch = part.text.trim().match(/^([A-Z0-9]+-[A-Z0-9]+):?\s*(.*)$/i)!;
+    const quantity = row.find(item => Math.abs(item.x - columns.quantityX) < 20 &&
+      Math.abs(item.y - anchor.y) < 12 && /^\d+$/.test(item.text.trim()));
+    const unitCell = row.find(item => /\$[\d,]+\.\d{2}\s*Ea\./i.test(item.text));
+    if (!quantity || !unitCell) continue;
+    const descriptionCells = row.filter(item => item.x >= columns.descriptionX - 20 &&
+      item.x < columns.availabilityX - 45 && item.y <= part.y + 4 &&
+      !/\bWeight\s*\(|^Non-returnable part$/i.test(item.text.trim()));
+    const description = descriptionCells.sort((a, b) => b.y - a.y || a.x - b.x)
+      .map(item => item === part ? partMatch[2] : item.text).join(' ').trim();
+    const weightCell = row.find(item => /\bWeight\s*\(/i.test(item.text));
+    const nonReturnable = row.some(item => /^Non-returnable part$/i.test(item.text.trim()));
+    const availabilityText = row.filter(item => item.x >= columns.availabilityX - 25 &&
+      item.y < anchor.y - 5 && !/\$|\bUSD\b|\bEa\./i.test(item.text))
+      .sort((a, b) => b.y - a.y || a.x - b.x)
+      .map(item => item.text).join(' ');
+    items.push({
+      lineNo: anchor.text.trim(),
+      qty: Number(quantity.text.trim()),
+      partNo: partMatch[1],
+      desc: description,
+      weight: weightCell ? extractWeight(weightCell.text).weight : 0,
+      unitPrice: Number(unitCell.text.match(/\$([\d,]+\.\d{2})/)![1].replace(/,/g, '')),
+      availability: normalizeAvailability(availabilityText),
+      notes: nonReturnable ? 'Non-returnable part' : '',
+      originalImages: []
+    });
+    yCoords.push(anchor.y);
+  }
+  return { items, yCoords, columns };
+}
+
 function parseTableBasedPage(rawItems: RawTextItem[]): { items: QuoteItem[], yCoords: number[] } {
   const items: QuoteItem[] = [];
   const yCoords: number[] = [];
@@ -818,6 +879,8 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
   // State persistence across pages
   let isRingDocument = false;
   let isJohnDeereDocument = false;
+  let isCatOrderDocument = false;
+  let catOrderColumns: CatOrderColumns | null = null;
   
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
@@ -860,6 +923,9 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
     if (/John Deere|Dobbs Equipment/i.test(pageText)) {
         isJohnDeereDocument = true;
     }
+    if (/Parts\.Cat\.Com/i.test(pageText)) {
+        isCatOrderDocument = true;
+    }
 
     if (pageNum === 1) {
         clientInfo = extractClientInfo(textLines);
@@ -869,7 +935,12 @@ export const parsePdfFile = async (file: File): Promise<{items: QuoteItem[], cli
     let yCoords: number[] = [];
 
     // Prioritize specialized parser if document type is known
-    if (isRingDocument) {
+    if (isCatOrderDocument) {
+        const result = parseCatOrderPage(rawItems, catOrderColumns);
+        pageItems = result.items;
+        yCoords = result.yCoords;
+        catOrderColumns = result.columns;
+    } else if (isRingDocument) {
         const result = parseRingPowerPage(textLines, pageNum > 1);
         pageItems = result.items;
         yCoords = result.yCoords;

@@ -40,6 +40,7 @@ export interface ServiceItem {
   taxable: boolean;
   imageUrl?: string;
   originalImages?: string[];
+  availability?: string;
 }
 
 export interface ServiceProvider {
