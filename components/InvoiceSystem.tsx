@@ -8,6 +8,7 @@ import { hubApiFetch } from '../services/hubApi.ts';
 import { invoiceWhatsAppMessage, whatsAppSendUrl } from '../services/whatsAppService.ts';
 import { Copy, Download, FileSpreadsheet, FileText, Link2, MessageCircle } from 'lucide-react';
 import { DOCUMENT_MARGINS_IN } from '../services/documentLayout.ts';
+import { customerFacingAvailability } from '../services/availability.ts';
 
 // --- High-Fidelity UI Components ---
 const CustomSelect: React.FC<{
@@ -854,6 +855,9 @@ export const InvoiceSystem: React.FC<InvoiceSystemProps> = ({ currentUser, custo
                                       value={item.description}
                                       onChange={(e) => updateItem(item.id, 'description', e.target.value)}
                                     />
+                                    {customerFacingAvailability(item.availability) && (
+                                      <span className="inline-block whitespace-pre-line mt-2.5 px-3 py-1 bg-slate-100 text-cat-black text-[9px] font-black uppercase rounded-full print:bg-white print:border print:border-slate-200 tracking-[0.15em]">STATUS: {customerFacingAvailability(item.availability)}</span>
+                                    )}
                                   </div>
                                 </div>
                               </td>

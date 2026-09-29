@@ -995,6 +995,7 @@ const App: React.FC = () => {
       return {
         id: `QT-${q.partNo}-${idx}`, description: `${q.partNo} - ${q.desc}`,
         hours: q.qty, rate: roundedRate, taxable: true, imageUrl: q.aiImageUrl,
+        availability: q.availability,
       };
     });
     const totalWeight = items.reduce((sum, i) => sum + (i.qty * i.weight), 0);

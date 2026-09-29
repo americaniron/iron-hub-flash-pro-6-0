@@ -6,6 +6,7 @@ import { Logo } from './Logo.tsx';
 import { calculateQuoteFinancials } from '../services/documentMath.ts';
 import { countryName } from '../services/countryOptions.ts';
 import { DOCUMENT_MARGINS_IN } from '../services/documentLayout.ts';
+import { customerFacingAvailability } from '../services/availability.ts';
 
 interface QuotePreviewProps {
   items: QuoteItem[];
@@ -479,8 +480,8 @@ export const QuotePreview: React.FC<QuotePreviewProps> = ({ items, client, confi
                           {item.desc}
                         </div>
                         {item.notes && <p className="text-[11px] text-slate-400 font-bold uppercase mt-1.5 line-item-notes print:text-slate-600 tracking-tight">{item.notes}</p>}
-                        {item.availability && (
-                           <span className="inline-block mt-2.5 px-3 py-1 bg-slate-100 text-cat-black text-[9px] font-black uppercase rounded-full print:bg-white print:border print:border-slate-200 tracking-[0.15em]">{t.status}: {item.availability}</span>
+                        {customerFacingAvailability(item.availability) && (
+                           <span className="inline-block whitespace-pre-line mt-2.5 px-3 py-1 bg-slate-100 text-cat-black text-[9px] font-black uppercase rounded-full print:bg-white print:border print:border-slate-200 tracking-[0.15em]">{t.status}: {customerFacingAvailability(item.availability)}</span>
                         )}
                       </div>
                     </div>
