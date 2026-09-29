@@ -22,6 +22,7 @@ export function normalizeAvailability(value: string | null | undefined): string 
 /** Also sanitize older saved quotes whose status still contains a location. */
 export function customerFacingAvailability(value: string | null | undefined): string {
   const source = String(value || '').trim();
+  if (/^\d+(?:\s*-\s*\d+)?\s+(?:business\s+)?days?\s+(?:build\s+to\s+order|back\s?order(?:ed)?|special\s+order)\b/i.test(source)) return source;
   const normalized = normalizeAvailability(source);
   if (normalized) return normalized;
   // Keep older date/backorder statuses, but never expose an unrecognised location as a status.
